@@ -348,3 +348,15 @@ func createHardDisk(client *govmomi.Client, size int, diskPath string, diskType 
 
 	return nil
 }
+
+// getDatastore gets datastore object
+func getDatastore(f *find.Finder, ds string) (*object.Datastore, error) {
+
+	if ds != "" {
+		dso, err := f.Datastore(context.TODO(), ds)
+		return dso, err
+	} else {
+		dso, err := f.DefaultDatastore(context.TODO())
+		return dso, err
+	}
+}
