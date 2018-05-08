@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/hashicorp/terraform/helper/schema"
+	"github.com/terraform-providers/terraform-provider-vsphere/vsphere/internal/helper/datastore"
 	"github.com/vmware/govmomi"
 	"github.com/vmware/govmomi/find"
 	"github.com/vmware/govmomi/object"
@@ -17,7 +18,9 @@ type file struct {
 	sourceDatacenter  string
 	datacenter        string
 	sourceDatastore   string
+	sourceDatastoreID string
 	datastore         string
+	datastoreID       string
 	sourceFile        string
 	destinationFile   string
 	createDirectories bool
@@ -36,35 +39,42 @@ func resourceVSphereFile() *schema.Resource {
 				Type:     schema.TypeString,
 				Optional: true,
 			},
-
 			"source_datacenter": {
 				Type:     schema.TypeString,
 				Optional: true,
 				ForceNew: true,
 			},
-
 			"datastore": {
-				Type:     schema.TypeString,
-				Required: true,
+				Type:          schema.TypeString,
+				Required:      true,
+				ConflictsWith: []string{"datastore_id"},
 			},
-
 			"source_datastore": {
-				Type:     schema.TypeString,
-				Optional: true,
-				ForceNew: true,
+				Type:          schema.TypeString,
+				Optional:      true,
+				ConflictsWith: []string{"datastore_id"},
+				ForceNew:      true,
 			},
-
+			"datastore_id": {
+				Type:          schema.TypeString,
+				Required:      true,
+				ConflictsWith: []string{"datastore", "datacenter"},
+			},
+			"source_datastore_id": {
+				Type:          schema.TypeString,
+				Optional:      true,
+				ForceNew:      true,
+				ConflictsWith: []string{"source_datastore", "source_datacenter"},
+			},
 			"source_file": {
 				Type:     schema.TypeString,
 				Required: true,
 				ForceNew: true,
 			},
-
 			"destination_file": {
 				Type:     schema.TypeString,
 				Required: true,
 			},
-
 			"create_directories": {
 				Type:     schema.TypeBool,
 				Optional: true,
@@ -131,26 +141,37 @@ func createFile(client *govmomi.Client, f *file) error {
 
 	finder := find.NewFinder(client.Client, true)
 
-	dc, err := finder.Datacenter(context.TODO(), f.datacenter)
+	destinationDatacenter, err := finder.Datacenter(context.TODO(), f.datacenter)
 	if err != nil {
 		return fmt.Errorf("error %s", err)
 	}
-	finder = finder.SetDatacenter(dc)
+	finder = finder.SetDatacenter(destinationDatacenter)
 
-	ds, err := getDatastore(finder, f.datastore)
+	var ds *object.Datastore
+	if f.datastore != "" {
+		ds, err = datastore.FromID(client, f.datastore)
+	} else {
+		ds, err = getDatastore(finder, f.datastore)
+	}
 	if err != nil {
 		return fmt.Errorf("error %s", err)
 	}
 
 	if f.copyFile {
 		// Copying file from withing vSphere
-		source_dc, err := finder.Datacenter(context.TODO(), f.sourceDatacenter)
+		sourceDatacenter, err := finder.Datacenter(context.TODO(), f.sourceDatacenter)
 		if err != nil {
 			return fmt.Errorf("error %s", err)
 		}
-		finder = finder.SetDatacenter(dc)
+		finder = finder.SetDatacenter(sourceDatacenter)
 
-		source_ds, err := getDatastore(finder, f.sourceDatastore)
+		var ds *object.Datastore
+		var sourceDatastore *object.Datastore
+		if f.datastore != "" {
+			sourceDatastore, err = datastore.FromID(client, f.sourceDatastore)
+		} else {
+			sourceDatastore, err := getDatastore(finder, f.sourceDatastore)
+		}
 		if err != nil {
 			return fmt.Errorf("error %s", err)
 		}
@@ -159,12 +180,12 @@ func createFile(client *govmomi.Client, f *file) error {
 		if f.createDirectories {
 			directoryPathIndex := strings.LastIndex(f.destinationFile, "/")
 			path := f.destinationFile[0:directoryPathIndex]
-			err = fm.MakeDirectory(context.TODO(), ds.Path(path), dc, true)
+			err = fm.MakeDirectory(context.TODO(), ds.Path(path), destinationDatacenter, true)
 			if err != nil {
 				return fmt.Errorf("error %s", err)
 			}
 		}
-		task, err := fm.CopyDatastoreFile(context.TODO(), source_ds.Path(f.sourceFile), source_dc, ds.Path(f.destinationFile), dc, true)
+		task, err := fm.CopyDatastoreFile(context.TODO(), sourceDatastore.Path(f.sourceFile), sourceDatacenter, ds.Path(f.destinationFile), destinationDatacenter, true)
 
 		if err != nil {
 			return fmt.Errorf("error %s", err)
@@ -177,13 +198,13 @@ func createFile(client *govmomi.Client, f *file) error {
 
 	} else {
 		// Uploading file to vSphere
-		dsurl, err := ds.URL(context.TODO(), dc, f.destinationFile)
+		dsURL, err := ds.URL(context.TODO(), destinationDatacenter, f.destinationFile)
 		if err != nil {
 			return fmt.Errorf("error %s", err)
 		}
 
 		p := soap.DefaultUpload
-		err = client.Client.UploadFile(context.TODO(), f.sourceFile, dsurl, &p)
+		err = client.Client.UploadFile(context.TODO(), f.sourceFile, dsURL, &p)
 		if err != nil {
 			return fmt.Errorf("error %s", err)
 		}
@@ -210,7 +231,7 @@ func resourceVSphereFileRead(d *schema.ResourceData, meta interface{}) error {
 	}
 
 	if v, ok := d.GetOk("datastore"); ok {
-		f.datastore = v.(string)
+		f.datastoreName = v.(string)
 	} else {
 		return fmt.Errorf("datastore argument is required")
 	}
@@ -236,7 +257,12 @@ func resourceVSphereFileRead(d *schema.ResourceData, meta interface{}) error {
 	}
 	finder = finder.SetDatacenter(dc)
 
-	ds, err := getDatastore(finder, f.datastore)
+	var ds *object.Datastore
+	if f.datastore != "" {
+		ds, err = datastore.FromID(client, f.datastore)
+	} else {
+		ds, err := getDatastore(finder, f.datastoreName)
+	}
 	if err != nil {
 		return fmt.Errorf("error %s", err)
 	}
@@ -256,87 +282,158 @@ func resourceVSphereFileRead(d *schema.ResourceData, meta interface{}) error {
 }
 
 func resourceVSphereFileUpdate(d *schema.ResourceData, meta interface{}) error {
-
 	log.Printf("[DEBUG] updating file: %#v", d)
+	var dsNew *object.Datastore
+	var dsOld *object.Datastore
+	var dcNew *object.Datacenter
+	var dcOld *object.Datacenter
+	var err error
 
-	if d.HasChange("destination_file") || d.HasChange("datacenter") || d.HasChange("datastore") {
-		// File needs to be moved, get old and new destination changes
-		var oldDataceneter, newDatacenter, oldDatastore, newDatastore, oldDestinationFile, newDestinationFile string
-		if d.HasChange("datacenter") {
-			tmpOldDataceneter, tmpNewDatacenter := d.GetChange("datacenter")
-			oldDataceneter = tmpOldDataceneter.(string)
-			newDatacenter = tmpNewDatacenter.(string)
-		} else {
-			if v, ok := d.GetOk("datacenter"); ok {
-				oldDataceneter = v.(string)
-				newDatacenter = oldDataceneter
-			}
-		}
-		if d.HasChange("datastore") {
-			tmpOldDatastore, tmpNewDatastore := d.GetChange("datastore")
-			oldDatastore = tmpOldDatastore.(string)
-			newDatastore = tmpNewDatastore.(string)
-		} else {
-			oldDatastore = d.Get("datastore").(string)
-			newDatastore = oldDatastore
-		}
-		if d.HasChange("destination_file") {
-			tmpOldDestinationFile, tmpNewDestinationFile := d.GetChange("destination_file")
-			oldDestinationFile = tmpOldDestinationFile.(string)
-			newDestinationFile = tmpNewDestinationFile.(string)
-		} else {
-			oldDestinationFile = d.Get("destination_file").(string)
-			newDestinationFile = oldDestinationFile
-		}
+	client := meta.(*VSphereClient).vimClient
 
-		// Get old and new dataceter and datastore
-		client := meta.(*VSphereClient).vimClient
-		dcOld, err := getDatacenter(client, oldDataceneter)
-		if err != nil {
-			return err
-		}
-		dcNew, err := getDatacenter(client, newDatacenter)
-		if err != nil {
-			return err
-		}
-		finder := find.NewFinder(client.Client, true)
-		finder = finder.SetDatacenter(dcOld)
-		dsOld, err := getDatastore(finder, oldDatastore)
-		if err != nil {
-			return fmt.Errorf("error %s", err)
-		}
-		finder = finder.SetDatacenter(dcNew)
-		dsNew, err := getDatastore(finder, newDatastore)
-		if err != nil {
-			return fmt.Errorf("error %s", err)
-		}
-
-		// Move file between old/new dataceter, datastore and path (destination_file)
-		fm := object.NewFileManager(client.Client)
-		task, err := fm.MoveDatastoreFile(context.TODO(), dsOld.Path(oldDestinationFile), dcOld, dsNew.Path(newDestinationFile), dcNew, true)
-		if err != nil {
-			return err
-		}
-		_, err = task.WaitForResult(context.TODO(), nil)
+	ods, nds := d.GetChange("datastore")
+	if nds != "" {
+		dsNew, err = datastore.FromID(client, nds)
 		if err != nil {
 			return err
 		}
 	}
+	if ods != "" {
+		dsOld, err = datastore.FromID(client, ods)
+		if err != nil {
+			return err
+		}
+	}
+	odsn, ndsn := d.HasChange("datastore")
+	odcn, ndcn := d.HasChange("datacenter")
+	if odsn != "" {
+		dsOld, err = getDatastore(finder, odsn)
+		if err != nil {
+			return err
+		}
+		dcOld, err = getDatacenter(client, odsn)
+		if err != nil {
+			return err
+		}
+	}
+	if ndsn != "" {
+		dsNew, err = getDatastore(finder, ndsn)
+		if err != nil {
+			return err
+		}
+		dcNew, err = getDatacenter(client, ndcn)
+		if err != nil {
+			return err
+		}
+	}
+	oldDestinationFile, newDestinationFile := d.GetChange("destination_file")
 
+	// Move file between old/new dataceter, datastore and path (destination_file)
+	fm := object.NewFileManager(client.Client)
+	task, err := fm.MoveDatastoreFile(context.TODO(), dsOld.Path(oldDestinationFile), dcOld, dsNew.Path(newDestinationFile), dcNew, true)
+	if err != nil {
+		return err
+	}
+	_, err = task.WaitForResult(context.TODO(), nil)
+	if err != nil {
+		return err
+	}
 	return nil
 }
+
+//func resourceVSphereFileUpdate(d *schema.ResourceData, meta interface{}) error {
+//
+//	log.Printf("[DEBUG] updating file: %#v", d)
+//
+//	if d.HasChange("destination_file") || d.HasChange("datacenter") || d.HasChange("datastore") {
+//		// File needs to be moved, get old and new destination changes
+//		var oldDataceneter, newDatacenter, oldDatastore, newDatastore, oldDestinationFile, newDestinationFile string
+//		if d.HasChange("datacenter") {
+//			tmpOldDataceneter, tmpNewDatacenter := d.GetChange("datacenter")
+//			oldDataceneter = tmpOldDataceneter.(string)
+//			newDatacenter = tmpNewDatacenter.(string)
+//		} else {
+//			if v, ok := d.GetOk("datacenter"); ok {
+//				oldDataceneter = v.(string)
+//				newDatacenter = oldDataceneter
+//			}
+//		}
+//		if d.HasChange("datastore") {
+//			tmpOldDatastore, tmpNewDatastore := d.GetChange("datastore")
+//			oldDatastore = tmpOldDatastore.(string)
+//			newDatastore = tmpNewDatastore.(string)
+//		} else {
+//			oldDatastore = d.Get("datastoreName").(string)
+//			newDatastore = oldDatastore
+//		}
+//		if d.HasChange("destination_file") {
+//			tmpOldDestinationFile, tmpNewDestinationFile := d.GetChange("destination_file")
+//			oldDestinationFile = tmpOldDestinationFile.(string)
+//			newDestinationFile = tmpNewDestinationFile.(string)
+//		} else {
+//			oldDestinationFile = d.Get("destination_file").(string)
+//			newDestinationFile = oldDestinationFile
+//		}
+//		oldDsID, newDsID := d.GetChange("datastore")
+//
+//		// Get old and new dataceter and datastore
+//		client := meta.(*VSphereClient).vimClient
+//		dcOld, err := getDatacenter(client, oldDataceneter)
+//		if err != nil {
+//			return err
+//		}
+//		dcNew, err := getDatacenter(client, newDatacenter)
+//		if err != nil {
+//			return err
+//		}
+//		finder := find.NewFinder(client.Client, true)
+//		finder = finder.SetDatacenter(dcOld)
+//		var ds *object.Datastore
+//		if f.datastore != "" {
+//			dsOld, err = datastore.FromID(client, oldDsID)
+//		} else {
+//			dsOld, err := getDatastore(finder, oldDatastore)
+//		}
+//		if err != nil {
+//			return fmt.Errorf("error %s", err)
+//		}
+//		finder = finder.SetDatacenter(dcNew)
+//		var ds *object.Datastore
+//		if f.datastore != "" {
+//			dsNew, err = datastore.FromID(client, newDsID)
+//		} else {
+//			dsNew, err := getDatastore(finder, newDatastore)
+//		}
+//		if err != nil {
+//			return fmt.Errorf("error %s", err)
+//		}
+//
+//		// Move file between old/new dataceter, datastore and path (destination_file)
+//		fm := object.NewFileManager(client.Client)
+//		task, err := fm.MoveDatastoreFile(context.TODO(), dsOld.Path(oldDestinationFile), dcOld, dsNew.Path(newDestinationFile), dcNew, true)
+//		if err != nil {
+//			return err
+//		}
+//		_, err = task.WaitForResult(context.TODO(), nil)
+//		if err != nil {
+//			return err
+//		}
+//	}
+//
+//	return nil
+//}
 
 func resourceVSphereFileDelete(d *schema.ResourceData, meta interface{}) error {
 
 	log.Printf("[DEBUG] deleting file: %#v", d)
 	f := file{}
 
-	if v, ok := d.GetOk("datacenter"); ok {
+	if v, ok := d.GetOk("datacenter_name"); ok {
 		f.datacenter = v.(string)
 	}
 
 	if v, ok := d.GetOk("datastore"); ok {
-		f.datastore = v.(string)
+		f.datastoreName = v.(string)
 	} else {
 		return fmt.Errorf("datastore argument is required")
 	}
@@ -374,7 +471,7 @@ func deleteFile(client *govmomi.Client, f *file) error {
 	finder := find.NewFinder(client.Client, true)
 	finder = finder.SetDatacenter(dc)
 
-	ds, err := getDatastore(finder, f.datastore)
+	ds, err := getDatastore(finder, f.datastoreName)
 	if err != nil {
 		return fmt.Errorf("error %s", err)
 	}
