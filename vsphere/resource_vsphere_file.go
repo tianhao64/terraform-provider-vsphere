@@ -115,12 +115,26 @@ func resourceVSphereFileUpdate(d *schema.ResourceData, meta interface{}) error {
 	if err != nil {
 		return err
 	}
+	if odds == nil {
+		odds = dds
+	}
 	df := d.Get("destination_file").(string)
 	odf, _ := d.GetChange("destination_file")
+	if odf == nil {
+		odf = df
+	}
+	odc, err := getDatacenter(client, odds.DatacenterPath)
+	if err != nil {
+		return err
+	}
+	dc, err := getDatacenter(client, dds.DatacenterPath)
+	if err != nil {
+		return err
+	}
 
 	fm := object.NewFileManager(client.Client)
 	log.Printf("[DEBUG] %s: Moving file from: %s, to: %s", d.Id(), odds.Path(odf.(string)), dds.Path(df))
-	task, err := fm.MoveDatastoreFile(context.TODO(), odds.Path(odf.(string)), nil, dds.Path(df), nil, true)
+	task, err := fm.MoveDatastoreFile(context.TODO(), odds.Path(odf.(string)), odc, dds.Path(df), dc, true)
 	if err != nil {
 		return err
 	}
@@ -134,14 +148,15 @@ func resourceVSphereFileUpdate(d *schema.ResourceData, meta interface{}) error {
 
 func resourceVSphereFileDelete(d *schema.ResourceData, meta interface{}) error {
 	log.Printf("[DEBUG] %s: Beginning delete", d.Id())
-	client := meta.(VSphereClient).vimClient
+	client := meta.(*VSphereClient).vimClient
 	_, dds, err := fileDatastores(d, client)
 	if err != nil {
 		return err
 	}
 	df := d.Get("destination_file").(string)
 	fm := object.NewFileManager(client.Client)
-	task, err := fm.DeleteDatastoreFile(context.TODO(), dds.Path(df), nil)
+	dc, _ := getDatacenter(client, dds.DatacenterPath)
+	task, err := fm.DeleteDatastoreFile(context.TODO(), dds.Path(df), dc)
 	if err != nil {
 		return err
 	}
@@ -174,57 +189,74 @@ func resourceVSphereFileCreate(d *schema.ResourceData, meta interface{}) error {
 			return err
 		}
 	}
+	d.SetId(fmt.Sprintf("[%s] %s", dds.Reference().Value, df))
 	log.Printf("[DEBUG] %s: Creation completed", d.Id())
 	return nil
 }
 
 func fileOldDatastores(d *schema.ResourceData, c *govmomi.Client) (*object.Datastore, *object.Datastore, error) {
-	var od *schema.ResourceData
+	var sds *object.Datastore
+	var dds *object.Datastore
 	oddsn, _ := d.GetChange("datastore")
 	oddcn, _ := d.GetChange("datacenter")
 	oddsi, _ := d.GetChange("datastore_id")
+	dds, err := fileDatastore(oddsn.(string), oddcn.(string), oddsi.(string), c)
+	if err != nil {
+		return nil, nil, err
+	}
 
-	_ = od.Set("datastore", oddsn)
-	_ = od.Set("datacenter", oddcn)
-	_ = od.Set("datastore_id", oddsi)
-
-	return fileDatastores(od, c)
+	osdsn, _ := d.GetChange("source_datastore")
+	osdcn, _ := d.GetChange("source_datacenter")
+	osdsi, _ := d.GetChange("source_datastore_id")
+	if osdsi.(string) != "" || osdsn.(string) != "" {
+		sds, err = fileDatastore(osdsn.(string), osdcn.(string), osdsi.(string), c)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	return dds, sds, nil
 }
 
 func fileDatastores(d *schema.ResourceData, c *govmomi.Client) (*object.Datastore, *object.Datastore, error) {
 	var sds *object.Datastore
 	var dds *object.Datastore
-	var err error
 	// Get the destination datastore
-	if dsID, ok := d.GetOk("datastore_id"); ok {
-		dds, err = datastore.FromID(c, dsID.(string))
-	} else {
-		dsName := d.Get("datastore").(string)
-		dcName := d.Get("datacenter").(string)
-		dds, err = fileDatastore(dsName, dcName, c)
-	}
+	ddsi := d.Get("datastore_id").(string)
+	ddsn := d.Get("datastore").(string)
+	ddcn := d.Get("datacenter").(string)
+	dds, err := fileDatastore(ddsn, ddcn, ddsi, c)
 	if err != nil {
 		return nil, nil, err
 	}
 	// Get the source datastore
-	_, iok := d.GetOk("source_datastore_id")
-	_, nok := d.GetOk("source_datastore")
-	switch {
-	case iok:
-		sds, err = datastore.FromID(c, d.Get("datastore_id").(string))
-	case nok:
-		dsName := d.Get("source_datastore").(string)
-		dcName := d.Get("source_datacenter").(string)
-		sds, err = fileDatastore(dsName, dcName, c)
-	}
-	if err != nil {
-		return nil, nil, err
+	sdsi := d.Get("source_datastore_id").(string)
+	sdsn := d.Get("source_datastore").(string)
+	sdcn := d.Get("source_datacenter").(string)
+	if sdsi != "" || sdsn != "" {
+		sds, err = fileDatastore(sdsn, sdcn, sdsi, c)
+		if err != nil {
+			return nil, nil, err
+		}
 	}
 	return sds, dds, nil
 }
 
+func fileDatastore(dsn string, dcn string, dsi string, c *govmomi.Client) (*object.Datastore, error) {
+	if dsi == "" {
+		dc, err := getDatacenter(c, dcn)
+		if err != nil {
+			return nil, err
+		}
+		return datastore.FromPath(c, dsn, dc)
+	}
+	return datastore.FromID(c, dsi)
+}
+
 func fileCreateDir(df string, dds *object.Datastore, fm *object.FileManager) error {
 	di := strings.LastIndex(df, "/")
+	if di == -1 {
+		return nil
+	}
 	path := df[0:di]
 	err := fm.MakeDirectory(context.TODO(), dds.Path(path), nil, true)
 	if err != nil {
@@ -239,7 +271,9 @@ func fileCopy(sds *object.Datastore, sf string, dds *object.Datastore, df string
 	if err != nil {
 		return err
 	}
-	task, err := fm.CopyDatastoreFile(context.TODO(), sds.Path(sf), nil, dds.Path(df), nil, true)
+	sdc, _ := getDatacenter(c, sds.DatacenterPath)
+	ddc, _ := getDatacenter(c, sds.DatacenterPath)
+	task, err := fm.CopyDatastoreFile(context.TODO(), sds.Path(sf), sdc, dds.Path(df), ddc, true)
 	if err != nil {
 		return err
 	}
@@ -248,14 +282,6 @@ func fileCopy(sds *object.Datastore, sf string, dds *object.Datastore, df string
 		return err
 	}
 	return nil
-}
-
-func fileDatastore(dsName string, dcName string, client *govmomi.Client) (*object.Datastore, error) {
-	dc, err := getDatacenter(client, dcName)
-	if err != nil {
-		return nil, err
-	}
-	return datastore.FromPath(client, dsName, dc)
 }
 
 func fileDeprecationNotice(old string, current string) string {

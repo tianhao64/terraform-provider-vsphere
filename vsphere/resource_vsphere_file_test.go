@@ -13,8 +13,6 @@ import (
 	"golang.org/x/net/context"
 )
 
-const sourceFile = "/tmp/tf_test.vmdk"
-
 // Basic file creation (upload to vSphere)
 func TestAccResourceVSphereFile_basic(t *testing.T) {
 	testVmdkFileData := []byte("# Disk DescriptorFile\n")
@@ -25,8 +23,12 @@ func TestAccResourceVSphereFile_basic(t *testing.T) {
 		return
 	}
 
-	resourceName := "vsphere_file." + name
+	datacenter := os.Getenv("VSPHERE_DATACENTER")
+	datastore := os.Getenv("VSPHERE_DATASTORE")
+	testMethod := "basic"
+	resourceName := "vsphere_file." + testMethod
 	destinationFile := "tf_file_test.vmdk"
+	sourceFile := testVmdkFile
 
 	resource.Test(t, resource.TestCase{
 		PreCheck:     func() { testAccPreCheck(t) },
@@ -34,7 +36,14 @@ func TestAccResourceVSphereFile_basic(t *testing.T) {
 		CheckDestroy: testAccCheckVSphereFileDestroy,
 		Steps: []resource.TestStep{
 			{
-				Config: testAccResourceVSphereFileConfigBasic(),
+				Config: fmt.Sprintf(
+					testAccCheckVSphereFileConfig,
+					testMethod,
+					datacenter,
+					datastore,
+					sourceFile,
+					destinationFile,
+				),
 				Check: resource.ComposeTestCheckFunc(
 					testAccCheckVSphereFileExists(resourceName, destinationFile, true),
 					resource.TestCheckResourceAttr(resourceName, "destination_file", destinationFile),
@@ -310,23 +319,6 @@ func testAccCheckVSphereFileExists(n string, df string, exists bool) resource.Te
 		}
 		return nil
 	}
-}
-
-func testAccResourceVSphereFileConfigBasic(name string) string {
-	return fmt.Sprintf(`
-resource "vsphere_file" "%s" {
-	datacenter = "%s"
-	datastore = "%s"
-	source_file = "%s"
-	destination_file = "%s"
-}
-`,
-		name,
-		os.Getenv("VSPHERE_DATACENTER"),
-		os.Getenv("VSPHERE_DATASTORE"),
-		sourceFile,
-		name,
-	)
 }
 
 const testAccCheckVSphereFileConfig = `
