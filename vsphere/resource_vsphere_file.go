@@ -3,6 +3,7 @@ package vsphere
 import (
 	"fmt"
 	"log"
+	"regexp"
 	"strings"
 
 	"github.com/hashicorp/terraform/helper/schema"
@@ -218,6 +219,7 @@ func fileOldDatastores(d *schema.ResourceData, c *govmomi.Client) (*object.Datas
 }
 
 func fileDatastores(d *schema.ResourceData, c *govmomi.Client) (*object.Datastore, *object.Datastore, error) {
+	log.Printf("[DEBUG] fileDatastores: Looking up source and destination datastores")
 	var sds *object.Datastore
 	var dds *object.Datastore
 	// Get the destination datastore
@@ -228,6 +230,7 @@ func fileDatastores(d *schema.ResourceData, c *govmomi.Client) (*object.Datastor
 	if err != nil {
 		return nil, nil, err
 	}
+	log.Printf("[DEBUG] fileDatastores: Found destination datastore %s", dds.Name())
 	// Get the source datastore
 	sdsi := d.Get("source_datastore_id").(string)
 	sdsn := d.Get("source_datastore").(string)
@@ -237,7 +240,9 @@ func fileDatastores(d *schema.ResourceData, c *govmomi.Client) (*object.Datastor
 		if err != nil {
 			return nil, nil, err
 		}
+		log.Printf("[DEBUG] fileDatastores: Found source datastore %s", sds.Name())
 	}
+	log.Printf("[DEBUG] fileDatastores: Datastore lookup completed")
 	return sds, dds, nil
 }
 
@@ -252,28 +257,43 @@ func fileDatastore(dsn string, dcn string, dsi string, c *govmomi.Client) (*obje
 	return datastore.FromID(c, dsi)
 }
 
-func fileCreateDir(df string, dds *object.Datastore, fm *object.FileManager) error {
+func fileCreateDir(df string, dds *object.Datastore, c *govmomi.Client) error {
+	log.Printf("[DEBUG] fileCreateDir: %s: Creating directory", df)
+	fm := object.NewFileManager(c.Client)
 	di := strings.LastIndex(df, "/")
 	if di == -1 {
 		return nil
 	}
+	ddc, _ := getDatacenter(c, dds.DatacenterPath)
 	path := df[0:di]
-	err := fm.MakeDirectory(context.TODO(), dds.Path(path), nil, true)
+	err := fm.MakeDirectory(context.TODO(), dds.Path(path), ddc, true)
 	if err != nil {
 		return err
 	}
+	log.Printf("[DEBUG] fileCreateDir: %s: Directory created", df)
 	return nil
 }
 
 func fileCopy(sds *object.Datastore, sf string, dds *object.Datastore, df string, c *govmomi.Client) error {
-	fm := object.NewFileManager(c.Client)
-	err := fileCreateDir(df, dds, fm)
+	log.Printf("[DEBUG] fileCopy: Copying file: [%s] %s to: [%s] %s", sds.Name(), sf, dds.Name(), df)
+	err := fileCreateDir(df, dds, c)
 	if err != nil {
 		return err
 	}
 	sdc, _ := getDatacenter(c, sds.DatacenterPath)
-	ddc, _ := getDatacenter(c, sds.DatacenterPath)
-	task, err := fm.CopyDatastoreFile(context.TODO(), sds.Path(sf), sdc, dds.Path(df), ddc, true)
+	ddc, _ := getDatacenter(c, dds.DatacenterPath)
+	log.Printf("[DEBUG] fileCopy: Source path: %s, Destination path: %s", sds.Path(sf), dds.Path(df))
+	re := regexp.MustCompile(".*\\.vmdk$")
+	var task *object.Task
+	if re.Match([]byte(df)) {
+		log.Printf("[DEBUG] fileCopy: File appears to be a VMDK. Using VirtualDiskManager")
+		vdm := object.NewVirtualDiskManager(c.Client)
+		task, err = vdm.CopyVirtualDisk(context.TODO(), sds.Path(sf), sdc, dds.Path(df), ddc, nil, true)
+	} else {
+		log.Printf("[DEBUG] fileCopy: File is not a VMDK. Using FileManager")
+		fm := object.NewFileManager(c.Client)
+		task, err = fm.CopyDatastoreFile(context.TODO(), sds.Path(sf), sdc, dds.Path(df), ddc, true)
+	}
 	if err != nil {
 		return err
 	}
@@ -281,6 +301,7 @@ func fileCopy(sds *object.Datastore, sf string, dds *object.Datastore, df string
 	if err != nil {
 		return err
 	}
+	log.Printf("[DEBUG] fileCopy: File copy complete")
 	return nil
 }
 
