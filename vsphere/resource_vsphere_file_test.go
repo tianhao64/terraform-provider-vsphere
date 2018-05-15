@@ -8,308 +8,95 @@ import (
 
 	"github.com/hashicorp/terraform/helper/resource"
 	"github.com/hashicorp/terraform/terraform"
-	"github.com/vmware/govmomi/find"
+	"github.com/terraform-providers/terraform-provider-vsphere/vsphere/internal/helper/datastore"
 	"github.com/vmware/govmomi/object"
 	"golang.org/x/net/context"
 )
 
-// Basic file creation (upload to vSphere)
 func TestAccResourceVSphereFile_basic(t *testing.T) {
-	testVmdkFileData := []byte("# Disk DescriptorFile\n")
-	testVmdkFile := "/tmp/tf_test.vmdk"
-	err := ioutil.WriteFile(testVmdkFile, testVmdkFileData, 0644)
-	if err != nil {
-		t.Errorf("error %s", err)
-		return
-	}
-
-	datacenter := os.Getenv("VSPHERE_DATACENTER")
-	datastore := os.Getenv("VSPHERE_DATASTORE")
-	testMethod := "basic"
-	resourceName := "vsphere_file." + testMethod
-	destinationFile := "tf_file_test.vmdk"
-	sourceFile := testVmdkFile
-
+	fileName := "/tmp/tf_file"
 	resource.Test(t, resource.TestCase{
-		PreCheck:     func() { testAccPreCheck(t) },
+		PreCheck: func() {
+			testAccPreCheck(t)
+			testAccResourceVSphereFilePreCheck(t)
+			testAccResourceVSphereFileCreateFile(fileName)
+		},
 		Providers:    testAccProviders,
-		CheckDestroy: testAccCheckVSphereFileDestroy,
+		CheckDestroy: testAccResourceVSphereFileCheckExists(false),
 		Steps: []resource.TestStep{
 			{
-				Config: fmt.Sprintf(
-					testAccCheckVSphereFileConfig,
-					testMethod,
-					datacenter,
-					datastore,
-					sourceFile,
-					destinationFile,
-				),
+				Config: testAccResourceVSphereFileConfigBasic(fileName),
 				Check: resource.ComposeTestCheckFunc(
-					testAccCheckVSphereFileExists(resourceName, destinationFile, true),
-					resource.TestCheckResourceAttr(resourceName, "destination_file", destinationFile),
+					testAccResourceVSphereFileCheckExists(true),
 				),
 			},
 		},
 	})
-	os.Remove(testVmdkFile)
 }
 
-// Basic file copy within vSphere
-func TestAccResourceVSphereFile_basicUploadAndCopy(t *testing.T) {
-	testVmdkFileData := []byte("# Disk DescriptorFile\n")
-	sourceFile := "/tmp/tf_test.vmdk"
-	uploadResourceName := "myfileupload"
-	copyResourceName := "myfilecopy"
-	sourceDatacenter := os.Getenv("VSPHERE_DATACENTER")
-	datacenter := sourceDatacenter
-	sourceDatastore := os.Getenv("VSPHERE_DATASTORE")
-	datastore := sourceDatastore
-	destinationFile := "tf_file_test.vmdk"
-	sourceFileCopy := "${vsphere_file." + uploadResourceName + ".destination_file}"
-	destinationFileCopy := "tf_file_test_copy.vmdk"
-
-	err := ioutil.WriteFile(sourceFile, testVmdkFileData, 0644)
-	if err != nil {
-		t.Errorf("error %s", err)
-		return
-	}
-
+func TestAccResourceVSphereFile_namesNotIDs(t *testing.T) {
+	fileName := "/tmp/tf_file"
 	resource.Test(t, resource.TestCase{
-		PreCheck:     func() { testAccPreCheck(t) },
+		PreCheck: func() {
+			testAccPreCheck(t)
+			testAccResourceVSphereFilePreCheck(t)
+			testAccResourceVSphereFileCreateFile(fileName)
+		},
 		Providers:    testAccProviders,
-		CheckDestroy: testAccCheckVSphereFileDestroy,
+		CheckDestroy: testAccResourceVSphereFileCheckExists(false),
 		Steps: []resource.TestStep{
 			{
-				Config: fmt.Sprintf(
-					testAccCheckVSphereFileCopyConfig,
-					uploadResourceName,
-					datacenter,
-					datastore,
-					sourceFile,
-					destinationFile,
-					copyResourceName,
-					datacenter,
-					datacenter,
-					datastore,
-					datastore,
-					sourceFileCopy,
-					destinationFileCopy,
-				),
+				Config: testAccResourceVSphereFileConfigBasicNames(fileName),
 				Check: resource.ComposeTestCheckFunc(
-					testAccCheckVSphereFileExists("vsphere_file."+uploadResourceName, destinationFile, true),
-					testAccCheckVSphereFileExists("vsphere_file."+copyResourceName, destinationFileCopy, true),
-					resource.TestCheckResourceAttr("vsphere_file."+uploadResourceName, "destination_file", destinationFile),
-					resource.TestCheckResourceAttr("vsphere_file."+copyResourceName, "destination_file", destinationFileCopy),
+					testAccResourceVSphereFileCheckExists(true),
 				),
 			},
 		},
 	})
-	os.Remove(sourceFile)
 }
 
-// file creation followed by a rename of file (update)
-func TestAccResourceVSphereFile_renamePostCreation(t *testing.T) {
-	testVmdkFileData := []byte("# Disk DescriptorFile\n")
-	testVmdkFile := "/tmp/tf_test.vmdk"
-	err := ioutil.WriteFile(testVmdkFile, testVmdkFileData, 0644)
-	if err != nil {
-		t.Errorf("error %s", err)
-		return
-	}
-
-	datacenter := os.Getenv("VSPHERE_DATACENTER")
-	datastore := os.Getenv("VSPHERE_DATASTORE")
-	testMethod := "create_upgrade"
-	resourceName := "vsphere_file." + testMethod
-	destinationFile := "tf_test_file.vmdk"
-	destinationFileMoved := "tf_test_file_moved.vmdk"
-	sourceFile := testVmdkFile
-
-	resource.Test(t, resource.TestCase{
-		PreCheck:     func() { testAccPreCheck(t) },
-		Providers:    testAccProviders,
-		CheckDestroy: testAccCheckVSphereFileDestroy,
-		Steps: []resource.TestStep{
-			{
-				Config: fmt.Sprintf(
-					testAccCheckVSphereFileConfig,
-					testMethod,
-					datacenter,
-					datastore,
-					sourceFile,
-					destinationFile,
-				),
-				Check: resource.ComposeTestCheckFunc(
-					testAccCheckVSphereFileExists(resourceName, destinationFile, true),
-					testAccCheckVSphereFileExists(resourceName, destinationFileMoved, false),
-					resource.TestCheckResourceAttr(resourceName, "destination_file", destinationFile),
-				),
-			},
-			{
-				Config: fmt.Sprintf(
-					testAccCheckVSphereFileConfig,
-					testMethod,
-					datacenter,
-					datastore,
-					sourceFile,
-					destinationFileMoved,
-				),
-				Check: resource.ComposeTestCheckFunc(
-					testAccCheckVSphereFileExists(resourceName, destinationFile, false),
-					testAccCheckVSphereFileExists(resourceName, destinationFileMoved, true),
-					resource.TestCheckResourceAttr(resourceName, "destination_file", destinationFileMoved),
-				),
-			},
-		},
-	})
-	os.Remove(testVmdkFile)
-}
-
-// file upload, then copy, finally the copy is renamed (moved) (update)
-func TestAccResourceVSphereFile_uploadAndCopyAndUpdate(t *testing.T) {
-	testVmdkFileData := []byte("# Disk DescriptorFile\n")
-	sourceFile := "/tmp/tf_test.vmdk"
-	uploadResourceName := "myfileupload"
-	copyResourceName := "myfilecopy"
-	sourceDatacenter := os.Getenv("VSPHERE_DATACENTER")
-	datacenter := sourceDatacenter
-	sourceDatastore := os.Getenv("VSPHERE_DATASTORE")
-	datastore := sourceDatastore
-	destinationFile := "tf_file_test.vmdk"
-	sourceFileCopy := "${vsphere_file." + uploadResourceName + ".destination_file}"
-	destinationFileCopy := "tf_file_test_copy.vmdk"
-	destinationFileMoved := "tf_test_file_moved.vmdk"
-
-	err := ioutil.WriteFile(sourceFile, testVmdkFileData, 0644)
-	if err != nil {
-		t.Errorf("error %s", err)
-		return
-	}
-
-	resource.Test(t, resource.TestCase{
-		PreCheck:     func() { testAccPreCheck(t) },
-		Providers:    testAccProviders,
-		CheckDestroy: testAccCheckVSphereFileDestroy,
-		Steps: []resource.TestStep{
-			{
-				Config: fmt.Sprintf(
-					testAccCheckVSphereFileCopyConfig,
-					uploadResourceName,
-					datacenter,
-					datastore,
-					sourceFile,
-					destinationFile,
-					copyResourceName,
-					datacenter,
-					datacenter,
-					datastore,
-					datastore,
-					sourceFileCopy,
-					destinationFileCopy,
-				),
-				Check: resource.ComposeTestCheckFunc(
-					testAccCheckVSphereFileExists("vsphere_file."+uploadResourceName, destinationFile, true),
-					testAccCheckVSphereFileExists("vsphere_file."+copyResourceName, destinationFileCopy, true),
-					resource.TestCheckResourceAttr("vsphere_file."+uploadResourceName, "destination_file", destinationFile),
-					resource.TestCheckResourceAttr("vsphere_file."+copyResourceName, "destination_file", destinationFileCopy),
-				),
-			},
-			{
-				Config: fmt.Sprintf(
-					testAccCheckVSphereFileCopyConfig,
-					uploadResourceName,
-					datacenter,
-					datastore,
-					sourceFile,
-					destinationFile,
-					copyResourceName,
-					datacenter,
-					datacenter,
-					datastore,
-					datastore,
-					sourceFileCopy,
-					destinationFileMoved,
-				),
-				Check: resource.ComposeTestCheckFunc(
-					testAccCheckVSphereFileExists("vsphere_file."+uploadResourceName, destinationFile, true),
-					testAccCheckVSphereFileExists("vsphere_file."+copyResourceName, destinationFileCopy, false),
-					testAccCheckVSphereFileExists("vsphere_file."+copyResourceName, destinationFileMoved, true),
-					resource.TestCheckResourceAttr("vsphere_file."+uploadResourceName, "destination_file", destinationFile),
-					resource.TestCheckResourceAttr("vsphere_file."+copyResourceName, "destination_file", destinationFileMoved),
-				),
-			},
-		},
-	})
-	os.Remove(sourceFile)
-}
-
-func testAccCheckVSphereFileDestroy(s *terraform.State) error {
-	client := testAccProvider.Meta().(*VSphereClient).vimClient
-	finder := find.NewFinder(client.Client, true)
-
-	for _, rs := range s.RootModule().Resources {
-		if rs.Type != "vsphere_file" {
-			continue
-		}
-
-		dc, err := finder.Datacenter(context.TODO(), rs.Primary.Attributes["datacenter"])
-		if err != nil {
-			return fmt.Errorf("error %s", err)
-		}
-
-		finder = finder.SetDatacenter(dc)
-
-		ds, err := getDatastore(finder, rs.Primary.Attributes["datastore"])
-		if err != nil {
-			return fmt.Errorf("error %s", err)
-		}
-
-		_, err = ds.Stat(context.TODO(), rs.Primary.Attributes["destination_file"])
-		if err != nil {
-			switch err.(type) {
-			case object.DatastoreNoSuchFileError:
-				return nil
-			default:
-				return err
-			}
-		} else {
-			return fmt.Errorf("File %s still exists", rs.Primary.Attributes["destination_file"])
-		}
-	}
-
-	return nil
-}
-
-func testAccCheckVSphereFileExists(n string, df string, exists bool) resource.TestCheckFunc {
+func testAccResourceVSphereFileCheckExists(expected bool) resource.TestCheckFunc {
 	return func(s *terraform.State) error {
-		rs, ok := s.RootModule().Resources[n]
+		rs, ok := s.RootModule().Resources["vsphere_file.file"]
 		if !ok {
-			return fmt.Errorf("Resource not found: %s", n)
+			if expected {
+				return fmt.Errorf("Resource not found: file")
+			} else {
+				return nil
+			}
 		}
-
 		if rs.Primary.ID == "" {
 			return fmt.Errorf("No ID is set")
 		}
 
 		client := testAccProvider.Meta().(*VSphereClient).vimClient
-		finder := find.NewFinder(client.Client, true)
-
-		dc, err := finder.Datacenter(context.TODO(), rs.Primary.Attributes["datacenter"])
-		if err != nil {
-			return fmt.Errorf("error %s", err)
+		dc, _ := getDatacenter(client, rs.Primary.Attributes["datacenter"])
+		dsID := rs.Primary.Attributes["datastore_id"]
+		dsName := rs.Primary.Attributes["datastore"]
+		var ds *object.Datastore
+		var err error
+		switch {
+		case dsID != "":
+			ds, err = datastore.FromID(client, dsID)
+			if err != nil {
+				return err
+			}
+		case dsName == "":
+			ds, err = datastore.DefaultDatastore(client, dc)
+			if err != nil {
+				return err
+			}
+		case dsName != "" && dc != nil:
+			ds, err = datastore.FromPath(client, dsName, dc)
+			if err != nil {
+				return err
+			}
 		}
-		finder = finder.SetDatacenter(dc)
-
-		ds, err := getDatastore(finder, rs.Primary.Attributes["datastore"])
-		if err != nil {
-			return fmt.Errorf("error %s", err)
-		}
-
-		_, err = ds.Stat(context.TODO(), df)
+		_, err = ds.Stat(context.TODO(), rs.Primary.Attributes["destination_file"])
 		if err != nil {
 			switch e := err.(type) {
 			case object.DatastoreNoSuchFileError:
-				if exists {
+				if expected {
 					return fmt.Errorf("File does not exist: %s", e.Error())
 				}
 				return nil
@@ -321,27 +108,107 @@ func testAccCheckVSphereFileExists(n string, df string, exists bool) resource.Te
 	}
 }
 
-const testAccCheckVSphereFileConfig = `
-resource "vsphere_file" "%s" {
-	datacenter = "%s"
-	datastore = "%s"
-	source_file = "%s"
-	destination_file = "%s"
+func testAccResourceVSphereFileCreateFile(name string) error {
+	err := ioutil.WriteFile(name, []byte("emptyData"), 0644)
+	if err != nil {
+		return err
+	}
+	return nil
 }
-`
-const testAccCheckVSphereFileCopyConfig = `
-resource "vsphere_file" "%s" {
-	datacenter = "%s"
-	datastore = "%s"
-	source_file = "%s"
-	destination_file = "%s"
+
+func testAccResourceVSphereFilePreCheck(t *testing.T) {
+	if os.Getenv("VSPHERE_DATACENTER") == "" {
+		t.Skip("set VSPHERE_DATACENTER to run vsphere_file acceptance tests")
+	}
+	if os.Getenv("VSPHERE_RESOURCE_POOL") == "" {
+		t.Skip("set VSPHERE_RESOURCE_POOL to run vsphere_file acceptance tests")
+	}
+	if os.Getenv("VSPHERE_DATASTORE") == "" {
+		t.Skip("set VSPHERE_DATASTORE to run vsphere_file acceptance tests")
+	}
+	if os.Getenv("VSPHERE_ESXI_HOST") == "" {
+		t.Skip("set VSPHERE_ESXI_HOST to run vsphere_file acceptance tests")
+	}
+	if os.Getenv("VSPHERE_DS_VMFS_DISK0") == "" {
+		t.Skip("set VSPHERE_DS_VMFS_DISK0 to run vsphere_file acceptance tests")
+	}
 }
-resource "vsphere_file" "%s" {
-	source_datacenter = "%s"
-	datacenter = "%s"
-	source_datastore = "%s"
-	datastore = "%s"
-	source_file = "%s"
-	destination_file = "%s"
+
+func testAccResourceVSphereFileConfigBasic(sourceFile string) string {
+	return fmt.Sprintf(`
+variable "datacenter" {
+	default = "%s"
 }
-`
+
+variable "datastore" {
+	default = "%s"
+}
+
+variable "destination_file" {
+	default = "/terraform_test_file_basic"
+}
+
+variable "source_file" {
+	default = "%s"
+}
+
+data "vsphere_datacenter" "datacenter" {
+	name = "${var.datacenter}"
+}
+
+data "vsphere_datastore" "datastore" {
+	name = "${var.datastore}"
+	datacenter_id = "${data.vsphere_datacenter.datacenter.id}"
+}
+
+resource "vsphere_file" "file" {
+	destination_file = "${var.destination_file}"
+	datastore_id = "${data.vsphere_datastore.datastore.id}"
+	source_file = "${var.source_file}"
+}
+`,
+		os.Getenv("VSPHERE_DATACENTER"),
+		os.Getenv("VSPHERE_DATASTORE"),
+		sourceFile,
+	)
+}
+
+func testAccResourceVSphereFileConfigBasicNames(sourceFile string) string {
+	return fmt.Sprintf(`
+variable "datacenter" {
+	default = "%s"
+}
+
+variable "datastore" {
+	default = "%s"
+}
+
+variable "destination_file" {
+	default = "/terraform_test_file_basic"
+}
+
+variable "source_file" {
+	default = "%s"
+}
+
+data "vsphere_datacenter" "datacenter" {
+	name = "${var.datacenter}"
+}
+
+data "vsphere_datastore" "datastore" {
+	name = "${var.datastore}"
+	datacenter_id = "${data.vsphere_datacenter.datacenter.id}"
+}
+
+resource "vsphere_file" "file" {
+	destination_file = "${var.destination_file}"
+	datastore = "${var.datastore}"
+	datacenter = "${var.datacenter}"
+	source_file = "${var.source_file}"
+}
+`,
+		os.Getenv("VSPHERE_DATACENTER"),
+		os.Getenv("VSPHERE_DATASTORE"),
+		sourceFile,
+	)
+}

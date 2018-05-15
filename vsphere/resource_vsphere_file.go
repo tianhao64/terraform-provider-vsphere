@@ -15,6 +15,11 @@ import (
 
 func resourceVSphereFile() *schema.Resource {
 	return &schema.Resource{
+		Create:        resourceVSphereFileCreate,
+		Read:          resourceVSphereFileRead,
+		Update:        resourceVSphereFileUpdate,
+		Delete:        resourceVSphereFileDelete,
+		CustomizeDiff: resourceVSphereFileCustomizeDiff,
 		Schema: map[string]*schema.Schema{
 			"datacenter": {
 				Type:          schema.TypeString,
@@ -77,22 +82,47 @@ func resourceVSphereFile() *schema.Resource {
 				Deprecated:  "create_directories is deprecated. Missing parent directories will automatically be created.",
 			},
 		},
-		Create: resourceVSphereFileCreate,
-		Read:   resourceVSphereFileRead,
-		Update: resourceVSphereFileUpdate,
-		Delete: resourceVSphereFileDelete,
 	}
+}
+
+func resourceVSphereFileCreate(d *schema.ResourceData, meta interface{}) error {
+	log.Printf("[DEBUG] %s: Beginning create", d.Get("destination_file").(string))
+	client := meta.(*VSphereClient).vimClient
+	sourceDS, destDS, err := fileDatastores(d, client)
+	if err != nil {
+		return err
+	}
+	destFile := d.Get("destination_file").(string)
+	sourceFile := d.Get("source_file").(string)
+	if sourceDS != nil && d.Get("source_file").(string) != "" {
+		err = fileCopy(sourceDS, sourceFile, destDS, destFile, client)
+		if err != nil {
+			return err
+		}
+	} else {
+		log.Printf("[DEBUG] %s: Uploading file", d.Get("destination_file").(string))
+		log.Printf("[DEBUG] %s: Uploading file", destDS)
+		url := destDS.NewURL(destFile)
+		log.Printf("[DEBUG] %s: Uploading file", url)
+		err = client.Client.UploadFile(context.TODO(), sourceFile, url, nil)
+		if err != nil {
+			return err
+		}
+	}
+	d.SetId(destFile)
+	log.Printf("[DEBUG] %s: Creation completed", d.Id())
+	return nil
 }
 
 func resourceVSphereFileRead(d *schema.ResourceData, meta interface{}) error {
 	log.Printf("[DEBUG] %s: Beginning read", d.Id())
 	client := meta.(*VSphereClient).vimClient
-	_, dds, err := fileDatastores(d, client)
+	_, destDS, err := fileDatastores(d, client)
 	if err != nil {
 		return err
 	}
-	df := d.Get("destination_file").(string)
-	_, err = dds.Stat(context.TODO(), df)
+	destFile := d.Get("destination_file").(string)
+	_, err = destDS.Stat(context.TODO(), destFile)
 	if err != nil {
 		if _, ok := err.(object.DatastoreNoSuchFileError); ok {
 			log.Printf("[DEBUG] %s: File not found. Removing.", d.Id())
@@ -101,6 +131,11 @@ func resourceVSphereFileRead(d *schema.ResourceData, meta interface{}) error {
 			return err
 		}
 	}
+	// Since the Id is based on the destination file name, it needs to be updated if the file moves.
+	if destFile != d.Id() {
+		log.Printf("[DEBUG] %s: New destination file name. Updating ID to: %s", d.Id(), destFile)
+		d.SetId(destFile)
+	}
 	log.Printf("[DEBUG] %s: Read complete", d.Id())
 	return nil
 }
@@ -108,34 +143,35 @@ func resourceVSphereFileRead(d *schema.ResourceData, meta interface{}) error {
 func resourceVSphereFileUpdate(d *schema.ResourceData, meta interface{}) error {
 	log.Printf("[DEBUG] %s: Beginning update", d.Id())
 	client := meta.(*VSphereClient).vimClient
-	_, odds, err := fileOldDatastores(d, client)
+	// Since source* elements are all ForceNew, we don't need to worry about them in an update.
+	_, oldDestDS, err := fileOldDatastores(d, client)
 	if err != nil {
 		return err
 	}
-	_, dds, err := fileDatastores(d, client)
+	_, destDS, err := fileDatastores(d, client)
 	if err != nil {
 		return err
 	}
-	if odds == nil {
-		odds = dds
+	if oldDestDS == nil {
+		oldDestDS = destDS
 	}
-	df := d.Get("destination_file").(string)
-	odf, _ := d.GetChange("destination_file")
-	if odf == nil {
-		odf = df
+	destFile := d.Get("destination_file").(string)
+	oldDestFile, _ := d.GetChange("destination_file")
+	if oldDestFile == nil {
+		oldDestFile = destFile
 	}
-	odc, err := getDatacenter(client, odds.DatacenterPath)
+	oldDC, err := getDatacenter(client, oldDestDS.DatacenterPath)
 	if err != nil {
 		return err
 	}
-	dc, err := getDatacenter(client, dds.DatacenterPath)
+	destDC, err := getDatacenter(client, destDS.DatacenterPath)
 	if err != nil {
 		return err
 	}
 
 	fm := object.NewFileManager(client.Client)
-	log.Printf("[DEBUG] %s: Moving file from: %s, to: %s", d.Id(), odds.Path(odf.(string)), dds.Path(df))
-	task, err := fm.MoveDatastoreFile(context.TODO(), odds.Path(odf.(string)), odc, dds.Path(df), dc, true)
+	log.Printf("[DEBUG] %s: Moving file to: [ %s ]%s", d.Id(), destDS.Name(), destDS.Path(destFile))
+	task, err := fm.MoveDatastoreFile(context.TODO(), oldDestDS.Path(oldDestFile.(string)), oldDC, destDS.Path(destFile), destDC, true)
 	if err != nil {
 		return err
 	}
@@ -150,14 +186,14 @@ func resourceVSphereFileUpdate(d *schema.ResourceData, meta interface{}) error {
 func resourceVSphereFileDelete(d *schema.ResourceData, meta interface{}) error {
 	log.Printf("[DEBUG] %s: Beginning delete", d.Id())
 	client := meta.(*VSphereClient).vimClient
-	_, dds, err := fileDatastores(d, client)
+	_, destDS, err := fileDatastores(d, client)
 	if err != nil {
 		return err
 	}
-	df := d.Get("destination_file").(string)
+	destFile := d.Get("destination_file").(string)
 	fm := object.NewFileManager(client.Client)
-	dc, _ := getDatacenter(client, dds.DatacenterPath)
-	task, err := fm.DeleteDatastoreFile(context.TODO(), dds.Path(df), dc)
+	destDC, _ := getDatacenter(client, destDS.DatacenterPath)
+	task, err := fm.DeleteDatastoreFile(context.TODO(), destDS.Path(destFile), destDC)
 	if err != nil {
 		return err
 	}
@@ -169,114 +205,108 @@ func resourceVSphereFileDelete(d *schema.ResourceData, meta interface{}) error {
 	return nil
 }
 
-func resourceVSphereFileCreate(d *schema.ResourceData, meta interface{}) error {
-	log.Printf("[DEBUG] %s: Beginning create", d.Get("destination_file").(string))
-	client := meta.(*VSphereClient).vimClient
-	sds, dds, err := fileDatastores(d, client)
-	if err != nil {
-		return err
+func resourceVSphereFileCustomizeDiff(d *schema.ResourceDiff, _ interface{}) error {
+	// Check that enough info is provided for the destination file. The minimum requirement is either a datacenter or
+	// datastore id. If just a datacenter is provided, then the default datastore will be used for that datacenter. When
+	// a datastore_id is provided, no datacenter is required since it is a unique identifier.
+	_, dcOk := d.GetOk("datacenter")
+	_, dsIdOk := d.GetOk("datastore_id")
+	if !dcOk && !dsIdOk {
+		return fmt.Errorf("datacenter or datastore_id required for vsphere_file resources")
 	}
-	df := d.Get("destination_file").(string)
-	sf := d.Get("source_file").(string)
-	if sds != nil && d.Get("source_file").(string) != "" {
-		err = fileCopy(sds, sf, dds, df, client)
-		if err != nil {
-			return err
-		}
-	} else {
-		url := dds.NewURL(df)
-		err = client.Client.UploadFile(context.TODO(), sf, url, nil)
-		if err != nil {
-			return err
-		}
-	}
-	d.SetId(fmt.Sprintf("[%s] %s", dds.Reference().Value, df))
-	log.Printf("[DEBUG] %s: Creation completed", d.Id())
 	return nil
 }
 
 func fileOldDatastores(d *schema.ResourceData, c *govmomi.Client) (*object.Datastore, *object.Datastore, error) {
-	var sds *object.Datastore
-	var dds *object.Datastore
+	log.Printf("[DEBUG] %s: Looking up old source and destination datastores", d.Id())
+	// Get the old destination datastore and datacenter info.
 	oddsn, _ := d.GetChange("datastore")
 	oddcn, _ := d.GetChange("datacenter")
 	oddsi, _ := d.GetChange("datastore_id")
 	dds, err := fileDatastore(oddsn.(string), oddcn.(string), oddsi.(string), c)
+	log.Printf("[DEBUG] %s: Old destination datastore found: %s", d.Id(), dds.Name())
 	if err != nil {
 		return nil, nil, err
 	}
-
+	// Get the old source datastore and datacenter info.
+	var sds *object.Datastore
 	osdsn, _ := d.GetChange("source_datastore")
 	osdcn, _ := d.GetChange("source_datacenter")
 	osdsi, _ := d.GetChange("source_datastore_id")
-	if osdsi.(string) != "" || osdsn.(string) != "" {
+	if osdsi.(string) != "" || osdcn.(string) != "" {
 		sds, err = fileDatastore(osdsn.(string), osdcn.(string), osdsi.(string), c)
 		if err != nil {
 			return nil, nil, err
 		}
+		log.Printf("[DEBUG] %s: Old source datastore found: %s", d.Id(), sds.Name())
 	}
+	log.Printf("[DEBUG] %s: Old source and destination datastore lookup complete", d.Id())
 	return dds, sds, nil
 }
 
 func fileDatastores(d *schema.ResourceData, c *govmomi.Client) (*object.Datastore, *object.Datastore, error) {
-	log.Printf("[DEBUG] fileDatastores: Looking up source and destination datastores")
-	var sds *object.Datastore
-	var dds *object.Datastore
-	// Get the destination datastore
+	log.Printf("[DEBUG] %s: Looking up source and destination datastores", d.Id())
+	// Get the destination datastore and datacenter info.
 	ddsi := d.Get("datastore_id").(string)
 	ddsn := d.Get("datastore").(string)
 	ddcn := d.Get("datacenter").(string)
 	dds, err := fileDatastore(ddsn, ddcn, ddsi, c)
+	log.Printf("[DEBUG] %s: Destination datastore found: %s", d.Id(), dds.Name())
 	if err != nil {
 		return nil, nil, err
 	}
 	log.Printf("[DEBUG] fileDatastores: Found destination datastore %s", dds.Name())
-	// Get the source datastore
+	// Get the source datastore and datacenter info.
+	var sds *object.Datastore
 	sdsi := d.Get("source_datastore_id").(string)
 	sdsn := d.Get("source_datastore").(string)
 	sdcn := d.Get("source_datacenter").(string)
-	if sdsi != "" || sdsn != "" {
+	if sdsi != "" || sdcn != "" {
 		sds, err = fileDatastore(sdsn, sdcn, sdsi, c)
 		if err != nil {
 			return nil, nil, err
 		}
-		log.Printf("[DEBUG] fileDatastores: Found source datastore %s", sds.Name())
+		log.Printf("[DEBUG] %s: Source datastore found: %s", d.Id(), sds.Name())
 	}
-	log.Printf("[DEBUG] fileDatastores: Datastore lookup completed")
+	log.Printf("[DEBUG] %s: Source and destination datastore lookup complete", d.Id())
 	return sds, dds, nil
 }
 
-func fileDatastore(dsn string, dcn string, dsi string, c *govmomi.Client) (*object.Datastore, error) {
-	if dsi == "" {
-		dc, err := getDatacenter(c, dcn)
-		if err != nil {
-			return nil, err
-		}
-		return datastore.FromPath(c, dsn, dc)
+// fileDatastore will no longer be needed after datacenter and datacenter names are removed in favor of datastore_id.
+func fileDatastore(datastoreName string, datacenterName string, datastoreId string, c *govmomi.Client) (*object.Datastore, error) {
+	dc, err := getDatacenter(c, datacenterName)
+	if err != nil {
+		return nil, err
 	}
-	return datastore.FromID(c, dsi)
+	switch {
+	case datastoreId == "" && datastoreName != "":
+		return datastore.FromPath(c, datastoreName, dc)
+	case datastoreId != "":
+		return datastore.FromID(c, datastoreId)
+	}
+	return datastore.DefaultDatastore(c, dc)
 }
 
-func fileCreateDir(df string, dds *object.Datastore, c *govmomi.Client) error {
-	log.Printf("[DEBUG] fileCreateDir: %s: Creating directory", df)
+func createDir(file string, ds *object.Datastore, c *govmomi.Client) error {
+	log.Printf("[DEBUG] %s: Creating directory", file)
 	fm := object.NewFileManager(c.Client)
-	di := strings.LastIndex(df, "/")
+	di := strings.LastIndex(file, "/")
 	if di == -1 {
 		return nil
 	}
-	ddc, _ := getDatacenter(c, dds.DatacenterPath)
-	path := df[0:di]
-	err := fm.MakeDirectory(context.TODO(), dds.Path(path), ddc, true)
+	ddc, _ := getDatacenter(c, ds.DatacenterPath)
+	path := file[0:di]
+	err := fm.MakeDirectory(context.TODO(), ds.Path(path), ddc, true)
 	if err != nil {
 		return err
 	}
-	log.Printf("[DEBUG] fileCreateDir: %s: Directory created", df)
+	log.Printf("[DEBUG] %s: Directory created", file)
 	return nil
 }
 
 func fileCopy(sds *object.Datastore, sf string, dds *object.Datastore, df string, c *govmomi.Client) error {
 	log.Printf("[DEBUG] fileCopy: Copying file: [%s] %s to: [%s] %s", sds.Name(), sf, dds.Name(), df)
-	err := fileCreateDir(df, dds, c)
+	err := createDir(df, dds, c)
 	if err != nil {
 		return err
 	}

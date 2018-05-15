@@ -52,6 +52,13 @@ func FromPath(client *govmomi.Client, name string, dc *object.Datacenter) (*obje
 	return finder.Datastore(ctx, name)
 }
 
+// DefaultDatastore returns the default datastore for the provided datacenter.
+func DefaultDatastore(client *govmomi.Client, dc *object.Datacenter) (*object.Datastore, error) {
+	finder := find.NewFinder(client.Client, true)
+	finder.SetDatacenter(dc)
+	return finder.DefaultDatastore(context.TODO())
+}
+
 // Properties is a convenience method that wraps fetching the
 // Datastore MO from its higher-level object.
 func Properties(ds *object.Datastore) (*mo.Datastore, error) {
