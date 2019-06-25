@@ -10,9 +10,10 @@ require (
 	github.com/dustinkirkland/golang-petname v0.0.0-20190613200456-11339a705ed2 // indirect
 	github.com/hashicorp/terraform v0.12.2
 	github.com/mitchellh/copystructure v1.0.0
+	github.com/sirupsen/logrus v1.4.2 // indirect
 	github.com/terraform-providers/terraform-provider-null v1.0.0
 	github.com/terraform-providers/terraform-provider-random v2.0.0+incompatible
 	github.com/terraform-providers/terraform-provider-template v1.0.0
-	github.com/vmware/govmomi v0.20.1
+	github.com/vmware/govmomi v0.18.0
 	github.com/vmware/vic v1.5.2
 )
