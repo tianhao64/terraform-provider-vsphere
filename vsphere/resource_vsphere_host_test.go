@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 	"testing"
 
 	"github.com/vmware/govmomi/vim25/soap"
@@ -23,11 +22,9 @@ func TestAccResourceVSphereHost_basic(t *testing.T) {
 	resource.Test(t, resource.TestCase{
 		PreCheck: func() {
 			testAccPreCheck(t)
-			// Test if host specific env vars are set
-			// testAccVSpherePreLicenseBasicCheck(t)
 		},
-		Providers: testAccProviders,
-		// CheckDestroy: testAccVSphereHostDestroy,
+		Providers:    testAccProviders,
+		CheckDestroy: testAccVSphereHostDestroy,
 		Steps: []resource.TestStep{
 			{
 				Config: testAccVSphereHostConfig(),
@@ -38,6 +35,72 @@ func TestAccResourceVSphereHost_basic(t *testing.T) {
 		},
 	})
 
+}
+
+func testAccVSphereHostExists(name string) resource.TestCheckFunc {
+	return func(s *terraform.State) error {
+		rs, ok := s.RootModule().Resources[name]
+
+		if !ok {
+			return fmt.Errorf("%s key not found on the server", name)
+		}
+		hostID := rs.Primary.ID
+		client := testAccProvider.Meta().(*VSphereClient).vimClient
+		// time.Sleep(3600 * time.Second)
+		res, err := hostExists(client, hostID)
+		if err != nil {
+			return err
+		}
+
+		if !res {
+			return fmt.Errorf("Host with ID %s not found", hostID)
+		}
+
+		return nil
+	}
+}
+
+func testAccVSphereHostDestroy(s *terraform.State) error {
+	message := ""
+	for _, rs := range s.RootModule().Resources {
+		if rs.Type != "vsphere_host" {
+			continue
+		}
+		hostID := rs.Primary.ID
+		client := testAccProvider.Meta().(*VSphereClient).vimClient
+		res, err := hostExists(client, hostID)
+		if err != nil {
+			return err
+		}
+
+		if res {
+			message += fmt.Sprintf("Host with ID %s was found", hostID)
+		}
+	}
+	if message != "" {
+		return errors.New(message)
+	}
+	return nil
+}
+
+func hostExists(client *govmomi.Client, hostID string) (bool, error) {
+	hs, err := hostsystem.FromID(client, hostID)
+	if err != nil {
+		if soap.IsSoapFault(err) {
+			sf := soap.ToSoapFault(err)
+			_, ok := sf.Detail.Fault.(types.ManagedObjectNotFound)
+			if !ok {
+				return false, err
+			}
+			return false, nil
+		}
+		return false, err
+	}
+
+	if hs.Reference().Value != hostID {
+		return false, nil
+	}
+	return true, nil
 }
 
 func testAccVSphereHostConfig() string {
@@ -69,69 +132,4 @@ func testAccVSphereHostConfig() string {
 		os.Getenv("ESX_PASSWORD"),
 		os.Getenv("ESX_THUMBPRINT"),
 		os.Getenv("VSPHERE_LICENSE"))
-}
-
-func hostExists(client *govmomi.Client, hostID string) (bool, error) {
-	hs, err := hostsystem.FromID(client, hostID)
-	if err != nil {
-		if soap.IsSoapFault(err) {
-			sf := soap.ToSoapFault(err)
-			_, ok := sf.Detail.Fault.(types.ManagedObjectNotFound)
-			if !ok {
-				return false, err
-			}
-			return false, nil
-		}
-		return false, err
-	}
-
-	if strings.Split(hs.String(), ":")[1] != hostID {
-		return false, nil
-	}
-	return true, nil
-}
-
-func testAccVSphereHostExists(name string) resource.TestCheckFunc {
-	return func(s *terraform.State) error {
-		rs, ok := s.RootModule().Resources[name]
-
-		if !ok {
-			return fmt.Errorf("%s key not found on the server", name)
-		}
-		hostID := rs.Primary.ID
-		client := testAccProvider.Meta().(*VSphereClient).vimClient
-		res, err := hostExists(client, hostID)
-		if err != nil {
-			return err
-		}
-
-		if !res {
-			return fmt.Errorf("Host with ID %s not found", hostID)
-		}
-
-		return nil
-	}
-}
-
-func testAccVSphereHostDestroy(s *terraform.State) error {
-	message := ""
-	for _, rs := range s.RootModule().Resources {
-		if rs.Type != "vsphere_host" {
-			continue
-		}
-		hostID := rs.Primary.ID
-		client := testAccProvider.Meta().(*VSphereClient).vimClient
-		res, err := hostExists(client, hostID)
-		if err != nil {
-			return err
-		}
-
-		if !res {
-			message += fmt.Sprintf("Host with ID %s not found", hostID)
-		}
-	}
-	if message != "" {
-		return errors.New(message)
-	}
-	return nil
 }
