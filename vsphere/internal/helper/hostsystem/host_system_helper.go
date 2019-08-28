@@ -6,6 +6,8 @@ import (
 	"log"
 	"time"
 
+	"github.com/vmware/govmomi/vim25/soap"
+
 	"github.com/terraform-providers/terraform-provider-vsphere/vsphere/internal/helper/provider"
 	"github.com/terraform-providers/terraform-provider-vsphere/vsphere/internal/helper/viapi"
 	"github.com/vmware/govmomi"
@@ -51,6 +53,13 @@ func FromID(client *govmomi.Client, id string) (*object.HostSystem, error) {
 	defer cancel()
 	hs, err := finder.ObjectReference(ctx, ref)
 	if err != nil {
+		if soap.IsSoapFault(err) {
+			sf := soap.ToSoapFault(err)
+			_, ok := sf.Detail.Fault.(types.ManagedObjectNotFound)
+			if ok {
+				return nil, err
+			}
+		}
 		return nil, fmt.Errorf("could not find host system with id: %s: %s", id, err)
 	}
 	log.Printf("[DEBUG] Host system found: %s", hs.Reference().Value)
@@ -98,6 +107,19 @@ func NameOrID(client *govmomi.Client, id string) string {
 	return name
 }
 
+// HostInMaintenance checks a HostSystem's maintenance mode and returns true if the
+// the host is in maintenance mode.
+func HostInMaintenance(host *object.HostSystem) (bool, error) {
+	var hostObject mo.HostSystem
+	err := host.Properties(context.Background(), host.Reference(), nil, &hostObject)
+	if err != nil {
+		return false, err
+	}
+
+	return hostObject.Runtime.InMaintenanceMode, nil
+
+}
+
 // EnterMaintenanceMode puts a host into maintenance mode. If evacuate is set
 // to true, all powered off VMs will be removed from the host, or the task will
 // block until this is the case, depending on whether or not DRS is on or off
@@ -105,6 +127,12 @@ func NameOrID(client *govmomi.Client, id string) string {
 func EnterMaintenanceMode(host *object.HostSystem, timeout int, evacuate bool) error {
 	if err := viapi.VimValidateVirtualCenter(host.Client()); err != nil {
 		evacuate = false
+	}
+
+	maintMode, err := HostInMaintenance(host)
+	if maintMode {
+		log.Printf("[DEBUG] Host %q is already in maintenance mode", host.Name())
+		return nil
 	}
 
 	log.Printf("[DEBUG] Host %q is entering maintenance mode (evacuate: %t)", host.Name(), evacuate)
@@ -121,6 +149,12 @@ func EnterMaintenanceMode(host *object.HostSystem, timeout int, evacuate bool) e
 
 // ExitMaintenanceMode takes a host out of maintenance mode.
 func ExitMaintenanceMode(host *object.HostSystem, timeout int) error {
+	maintMode, err := HostInMaintenance(host)
+	if !maintMode {
+		log.Printf("[DEBUG] Host %q is already not in maintenance mode", host.Name())
+		return nil
+	}
+
 	log.Printf("[DEBUG] Host %q is exiting maintenance mode", host.Name())
 
 	// Add 5 minutes to timeout for the context timeout to allow for any issues
