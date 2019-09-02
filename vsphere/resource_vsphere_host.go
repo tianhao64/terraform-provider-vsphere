@@ -6,12 +6,12 @@ import (
 	"log"
 	"strings"
 
+	"github.com/terraform-providers/terraform-provider-vsphere/vsphere/internal/helper/hostsystem"
 	"github.com/vmware/govmomi/license"
 
 	"github.com/terraform-providers/terraform-provider-vsphere/vsphere/internal/helper/clustercomputeresource"
 
-	"github.com/terraform-providers/terraform-provider-vsphere/vsphere/internal/helper/hostsystem"
-
+	"github.com/vmware/govmomi/object"
 	"github.com/vmware/govmomi/vim25/mo"
 	"github.com/vmware/govmomi/vim25/soap"
 	"github.com/vmware/govmomi/vim25/types"
@@ -64,6 +64,12 @@ func resourceVsphereHost() *schema.Resource {
 				Description: "Force add the host to vsphere, even if it's already managed by a different vSphere instance.",
 				Default:     false,
 			},
+			"connected": {
+				Type:        schema.TypeBool,
+				Optional:    true,
+				Description: "Set the state of the host. If set to false then the host will be asked to disconnect.",
+				Default:     true,
+			},
 		},
 	}
 }
@@ -109,6 +115,17 @@ func resourceVsphereHostRead(d *schema.ResourceData, meta interface{}) error {
 		d.Set("cluster", host.Parent.Value)
 	} else {
 		d.Set("cluster", "")
+	}
+
+	connectionState, err := hostsystem.GetConnectionState(hs)
+	if err != nil {
+		return err
+	}
+
+	if connectionState != types.HostSystemConnectionStateDisconnected {
+		d.Set("connected", true)
+	} else {
+		d.Set("conencted", false)
 	}
 
 	lm := license.NewManager(client.Client)
@@ -199,12 +216,67 @@ func resourceVsphereHostCreate(d *schema.ResourceData, meta interface{}) error {
 }
 
 func resourceVsphereHostUpdate(d *schema.ResourceData, meta interface{}) error {
-	// d.GetChange()
+	client := meta.(*VSphereClient).vimClient
+
+	// First let's establish where we are and where we want to go
+	var desiredConnectionState bool
+	if d.HasChange("connected") {
+		_, new := d.GetChange("connected")
+		desiredConnectionState = new.(bool)
+	} else {
+		desiredConnectionState = d.Get("connected").(bool)
+	}
+
+	hostID := d.Id()
+	hostObject, err := hostsystem.FromID(client, hostID)
+	if err != nil {
+		return err
+	}
+
+	actualConnectionState, err := hostsystem.GetConnectionState(hostObject)
+	if err != nil {
+		return err
+	}
+
+	// Have there been any changes that warrant a reconnect?
+	reconnect := false
+	connectionKeys := []string{"hostname", "username", "password", "thumbprint"}
+	for _, k := range connectionKeys {
+		if d.HasChange(k) {
+			reconnect = true
+			break
+		}
+	}
+
+	// Decide if we're going to reconnect or not
+	reconnectNeeded, err := shouldReconnect(d, meta, actualConnectionState, desiredConnectionState, reconnect)
+	if err != nil {
+		return err
+	}
+
+	switch reconnectNeeded {
+	case 1:
+		err := handleReconnect(d, meta)
+		if err != nil {
+			return err
+		}
+	case -1:
+		err := handleDisconnect(d, meta)
+		if err != nil {
+			return err
+		}
+	case 0:
+		break
+	}
+
 	mutableKeys := map[string]func(*schema.ResourceData, interface{}, interface{}, interface{}) error{
 		"license": modifyLicense,
 		"cluster": modifyCluster,
 	}
 	for k, v := range mutableKeys {
+		if !d.HasChange(k) {
+			continue
+		}
 		old, new := d.GetChange(k)
 		err := v(d, meta, old, new)
 		if err != nil {
@@ -306,3 +378,103 @@ func modifyCluster(d *schema.ResourceData, meta, old, new interface{}) error {
 
 	return nil
 }
+
+func handleReconnect(d *schema.ResourceData, meta interface{}) error {
+	hostID := d.Id()
+	client := meta.(*VSphereClient).vimClient
+	host := object.NewHostSystem(client.Client, types.ManagedObjectReference{Type: "HostSystem", Value: d.Id()})
+	hcs := types.HostConnectSpec{
+		HostName:      d.Get("hostname").(string),
+		UserName:      d.Get("username").(string),
+		Password:      d.Get("password").(string),
+		SslThumbprint: d.Get("thumbprint").(string),
+		Force:         d.Get("force").(bool),
+	}
+
+	task, err := host.Reconnect(context.TODO(), &hcs, nil)
+	if err != nil {
+		return err
+	}
+
+	err = task.Wait(context.TODO())
+	if err != nil {
+		return fmt.Errorf("Error while waiting for host (%s) to reconnect: %s", hostID, err)
+	}
+
+	var to mo.Task
+	err = task.Properties(context.TODO(), task.Reference(), nil, &to)
+	if err != nil {
+		log.Printf("[DEBUG] Failed while getting task results: %s", err)
+		return err
+	}
+
+	if to.Info.State != "success" {
+		return fmt.Errorf("Error while reconnecting host(%s): %s", hostID, to.Info.Error)
+	}
+	return nil
+}
+
+func handleDisconnect(d *schema.ResourceData, meta interface{}) error {
+	hostID := d.Id()
+	client := meta.(*VSphereClient).vimClient
+	host := object.NewHostSystem(client.Client, types.ManagedObjectReference{Type: "HostSystem", Value: d.Id()})
+	task, err := host.Disconnect(context.TODO())
+	if err != nil {
+		return err
+	}
+
+	err = task.Wait(context.TODO())
+	if err != nil {
+		return fmt.Errorf("Error while waiting for host (%s) to disconnect: %s", hostID, err)
+	}
+
+	var to mo.Task
+	err = task.Properties(context.TODO(), task.Reference(), nil, &to)
+	if err != nil {
+		log.Printf("[DEBUG] Failed while getting task results: %s", err)
+		return err
+	}
+
+	if to.Info.State != "success" {
+		return fmt.Errorf("Error while disconnecting host(%s): %s", hostID, to.Info.Error)
+	}
+	return nil
+}
+
+func shouldReconnect(d *schema.ResourceData, meta interface{}, actual types.HostSystemConnectionState, desired, shouldReconnect bool) (int, error) {
+	log.Printf("[DEBUG] Figuring out if we need to do something about the host's connection")
+
+	// desired state is connected and one of the connectionKeys has changed
+	if shouldReconnect && desired {
+		log.Printf("[DEBUG] Desired state is connected and one of the settings relevant to the connection changed. Reconnecting")
+		return 1, nil
+	}
+
+	// desired state is connected and actual state is disconnected
+	if desired && (actual != types.HostSystemConnectionStateConnected) {
+		log.Printf("[DEBUG] Desired state is connected but host is not connected. Reconnecting")
+		return 1, nil
+	}
+
+	// desired state is connected and actual state is connected (or host is missing heartbeats) and
+	// none of the connectionKeys have changed.
+	if desired && (actual != types.HostSystemConnectionStateDisconnected) && !shouldReconnect {
+		log.Printf("[DEBUG] Desired state is connected and host is connected and no changes in config. Noop")
+		return 0, nil
+	}
+
+	// desired state is disconnected and host is disconnected
+	if !desired && (actual == types.HostSystemConnectionStateDisconnected) {
+		log.Printf("[DEBUG] Desired state is disconnected and host is disconnected")
+		return 0, nil
+	}
+
+	if !desired && (actual != types.HostSystemConnectionStateDisconnected) {
+		log.Printf("[DEBUG] Desired state is disconnected but host is not disconnected. Disconnecting")
+		return -1, nil
+	}
+
+	log.Printf("[DEBUG] Unexpected combination of desired and actual states, not sure how to handle. Please submit a bug report.")
+	return 255, fmt.Errorf("Unexpected combination of connection states")
+}
+

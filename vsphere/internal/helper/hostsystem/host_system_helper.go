@@ -170,3 +170,14 @@ func ExitMaintenanceMode(host *object.HostSystem, timeout int) error {
 
 	return task.Wait(ctx)
 }
+
+// GetConnectionState returns the host's connection state (see vim.HostSystem.ConnectionState)
+func GetConnectionState(host *object.HostSystem) (types.HostSystemConnectionState, error) {
+	var hostProps mo.HostSystem
+	err := host.Properties(context.TODO(), host.Reference(), nil, &hostProps)
+	if err != nil {
+		return "", err
+	}
+
+	return hostProps.Runtime.ConnectionState, nil
+}
