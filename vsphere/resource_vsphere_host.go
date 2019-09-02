@@ -58,6 +58,12 @@ func resourceVsphereHost() *schema.Resource {
 				Optional:    true,
 				Description: "License key that will be applied to this host.",
 			},
+			"force": {
+				Type:        schema.TypeBool,
+				Optional:    true,
+				Description: "Force add the host to vsphere, even if it's already managed by a different vSphere instance.",
+				Default:     false,
+			},
 		},
 	}
 }
@@ -146,6 +152,7 @@ func resourceVsphereHostCreate(d *schema.ResourceData, meta interface{}) error {
 		UserName:      d.Get("username").(string),
 		Password:      d.Get("password").(string),
 		SslThumbprint: d.Get("thumbprint").(string),
+		Force:         d.Get("force").(bool),
 	}
 
 	licenseKey := d.Get("license").(string)
@@ -167,7 +174,8 @@ func resourceVsphereHostCreate(d *schema.ResourceData, meta interface{}) error {
 		return fmt.Errorf("license key supplied (%s) did not match against known license keys", licenseKey)
 	}
 
-	task, err := ccr.AddHost(context.TODO(), hcs, true, &licenseKey, nil)
+	forcedState := d.Get("forced").(bool)
+	task, err := ccr.AddHost(context.TODO(), hcs, forcedState, &licenseKey, nil)
 	if err != nil {
 		log.Printf("[DEBUG] Error while adding host with hostname %s to cluster %s.  Error: %s", d.Get("hostname").(string), clusterID, err)
 	}
