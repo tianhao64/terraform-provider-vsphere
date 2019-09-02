@@ -12,6 +12,8 @@ import (
 	"github.com/terraform-providers/terraform-provider-vsphere/vsphere/internal/helper/clustercomputeresource"
 
 	"github.com/vmware/govmomi/object"
+	"github.com/vmware/govmomi/vim25"
+	"github.com/vmware/govmomi/vim25/methods"
 	"github.com/vmware/govmomi/vim25/mo"
 	"github.com/vmware/govmomi/vim25/soap"
 	"github.com/vmware/govmomi/vim25/types"
@@ -76,6 +78,12 @@ func resourceVsphereHost() *schema.Resource {
 				Description: "Set the host's maintenance mode. Default is false",
 				Default:     false,
 			},
+			"lockdown": {
+				Type:        schema.TypeString,
+				Optional:    true,
+				Description: "Set the host's lockdown status. Default is disabled. Valid options are 'disabled', 'normal', 'strict'",
+				Default:     "disabled",
+			},
 		},
 	}
 }
@@ -128,6 +136,14 @@ func resourceVsphereHostRead(d *schema.ResourceData, meta interface{}) error {
 	} else {
 		d.Set("cluster", "")
 	}
+
+	lockdownMode, err := hostLockdownString(host)
+	if err != nil {
+		return nil
+	}
+
+	log.Printf("Setting lockdown to %s", lockdownMode)
+	d.Set("lockdown", lockdownMode)
 
 	connectionState, err := hostsystem.GetConnectionState(hs)
 	if err != nil {
@@ -229,6 +245,25 @@ func resourceVsphereHostCreate(d *schema.ResourceData, meta interface{}) error {
 		return err
 	}
 
+	lockdownModeString := d.Get("lockdown").(string)
+	lockdownMode, err := hostLockdownType(lockdownModeString)
+	if err != nil {
+		return err
+	}
+
+	var hostProps mo.HostSystem
+	err = host.Properties(context.TODO(), host.ConfigManager().Reference(), []string{"configManager.hostAccessManager"}, &hostProps)
+	if err != nil {
+		return err
+	}
+
+	hamRef := hostProps.ConfigManager.HostAccessManager.Reference()
+	ham := NewHostAccessManager(client.Client, hamRef)
+	err = ham.ChangeLockdownMode(context.TODO(), lockdownMode)
+	if err != nil {
+		return err
+	}
+
 	maintenanceMode := d.Get("maintenance").(bool)
 	var maintErr error
 	if maintenanceMode {
@@ -301,6 +336,7 @@ func resourceVsphereHostUpdate(d *schema.ResourceData, meta interface{}) error {
 		"license":     modifyLicense,
 		"cluster":     modifyCluster,
 		"maintenance": modifyMaintenanceMode,
+		"lockdown":    modifyLockdownMode,
 	}
 	for k, v := range mutableKeys {
 		if !d.HasChange(k) {
@@ -348,6 +384,35 @@ func resourceVsphereHostDelete(d *schema.ResourceData, meta interface{}) error {
 	if to.Info.State != "success" {
 		return fmt.Errorf("Error while removing host(%s): %s", hostID, to.Info.Error)
 	}
+	return nil
+}
+
+func modifyLockdownMode(d *schema.ResourceData, meta, old, new interface{}) error {
+	client := meta.(*VSphereClient).vimClient
+	hostID := d.Id()
+	host, err := hostsystem.FromID(client, hostID)
+	if err != nil {
+		return err
+	}
+	lockdownModeString := new.(string)
+	lockdownMode, err := hostLockdownType(lockdownModeString)
+	if err != nil {
+		return err
+	}
+
+	var hostProps mo.HostSystem
+	err = host.Properties(context.TODO(), host.ConfigManager().Reference(), []string{"configManager.hostAccessManager"}, &hostProps)
+	if err != nil {
+		return err
+	}
+
+	hamRef := hostProps.ConfigManager.HostAccessManager.Reference()
+	ham := NewHostAccessManager(client.Client, hamRef)
+	err = ham.ChangeLockdownMode(context.TODO(), lockdownMode)
+	if err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -529,3 +594,57 @@ func shouldReconnect(d *schema.ResourceData, meta interface{}, actual types.Host
 	return 255, fmt.Errorf("Unexpected combination of connection states")
 }
 
+func hostLockdownType(lockdownMode string) (types.HostLockdownMode, error) {
+	lockdownModes := map[string]types.HostLockdownMode{
+		"disabled": types.HostLockdownModeLockdownDisabled,
+		"normal":   types.HostLockdownModeLockdownNormal,
+		"strict":   types.HostLockdownModeLockdownStrict,
+	}
+
+	log.Printf("Looking for mode %s in lockdown modes %#v", lockdownMode, lockdownModes)
+	if modeString, ok := lockdownModes[lockdownMode]; ok {
+		log.Printf("Found match for %s. Returning %s.", lockdownMode, modeString)
+		return modeString, nil
+	}
+	return "", fmt.Errorf("Unknwown Lockdown mode encountered")
+}
+
+func hostLockdownString(host *mo.HostSystem) (string, error) {
+	lockdownModes := map[types.HostLockdownMode]string{
+		types.HostLockdownModeLockdownDisabled: "disabled",
+		types.HostLockdownModeLockdownNormal:   "normal",
+		types.HostLockdownModeLockdownStrict:   "strict",
+	}
+
+	lockdownMode := host.Config.LockdownMode
+	log.Printf("Looking for mode %s in lockdown modes %#v", lockdownMode, lockdownModes)
+	if modeString, ok := lockdownModes[lockdownMode]; ok {
+		log.Printf("Found match for %s. Returning %s.", lockdownMode, modeString)
+		return modeString, nil
+	}
+	return "", fmt.Errorf("Unknwown Lockdown mode encountered")
+}
+
+// --------------
+// Implementing stuff govmomi should provide for us
+//
+//
+
+type HostAccessManager struct {
+	object.Common
+}
+
+func NewHostAccessManager(c *vim25.Client, ref types.ManagedObjectReference) *HostAccessManager {
+	return &HostAccessManager{
+		Common: object.NewCommon(c, ref),
+	}
+}
+
+func (h HostAccessManager) ChangeLockdownMode(ctx context.Context, mode types.HostLockdownMode) error {
+	req := types.ChangeLockdownMode{
+		This: h.Reference(),
+		Mode: mode,
+	}
+	_, err := methods.ChangeLockdownMode(ctx, h.Client(), &req)
+	return err
+}
