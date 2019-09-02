@@ -70,6 +70,12 @@ func resourceVsphereHost() *schema.Resource {
 				Description: "Set the state of the host. If set to false then the host will be asked to disconnect.",
 				Default:     true,
 			},
+			"maintenance": {
+				Type:        schema.TypeBool,
+				Optional:    true,
+				Description: "Set the host's maintenance mode. Default is false",
+				Default:     false,
+			},
 		},
 	}
 }
@@ -102,6 +108,12 @@ func resourceVsphereHostRead(d *schema.ResourceData, meta interface{}) error {
 		log.Printf("[DEBUG] non SOAP error while searching host %s. Error %#v", hostID, err)
 		return err
 	}
+
+	maintenanceState, err := hostsystem.HostInMaintenance(hs)
+	if err != nil {
+		return nil
+	}
+	d.Set("maintenance", maintenanceState)
 
 	// Retrieve host's properties.
 	log.Printf("[DEBUG] Got host %#v", hs)
@@ -212,6 +224,22 @@ func resourceVsphereHostCreate(d *schema.ResourceData, meta interface{}) error {
 	d.SetId(hostID)
 	log.Printf("[DEBUG] set host ID to %s", hostID)
 
+	host, err := hostsystem.FromID(client, hostID)
+	if err != nil {
+		return err
+	}
+
+	maintenanceMode := d.Get("maintenance").(bool)
+	var maintErr error
+	if maintenanceMode {
+		maintErr = hostsystem.EnterMaintenanceMode(host, int(defaultAPITimeout), true)
+	} else {
+		maintErr = hostsystem.ExitMaintenanceMode(host, int(defaultAPITimeout))
+	}
+	if maintErr != nil {
+		return maintErr
+	}
+
 	return resourceVsphereHostRead(d, meta)
 }
 
@@ -270,8 +298,9 @@ func resourceVsphereHostUpdate(d *schema.ResourceData, meta interface{}) error {
 	}
 
 	mutableKeys := map[string]func(*schema.ResourceData, interface{}, interface{}, interface{}) error{
-		"license": modifyLicense,
-		"cluster": modifyCluster,
+		"license":     modifyLicense,
+		"cluster":     modifyCluster,
+		"maintenance": modifyMaintenanceMode,
 	}
 	for k, v := range mutableKeys {
 		if !d.HasChange(k) {
@@ -322,6 +351,28 @@ func resourceVsphereHostDelete(d *schema.ResourceData, meta interface{}) error {
 	return nil
 }
 
+func modifyMaintenanceMode(d *schema.ResourceData, meta, old, new interface{}) error {
+	client := meta.(*VSphereClient).vimClient
+	hostID := d.Id()
+
+	host, err := hostsystem.FromID(client, hostID)
+	if err != nil {
+		return err
+	}
+
+	maintenanceMode := new.(bool)
+	var maintErr error
+	if maintenanceMode {
+		maintErr = hostsystem.EnterMaintenanceMode(host, int(defaultAPITimeout), true)
+	} else {
+		maintErr = hostsystem.ExitMaintenanceMode(host, int(defaultAPITimeout))
+	}
+	if maintErr != nil {
+		return maintErr
+	}
+	return nil
+}
+
 func modifyLicense(d *schema.ResourceData, meta, old, new interface{}) error {
 	client := meta.(*VSphereClient).vimClient
 	lm := license.NewManager(client.Client)
@@ -349,7 +400,7 @@ func modifyCluster(d *schema.ResourceData, meta, old, new interface{}) error {
 		return err
 	}
 
-	err = hostsystem.EnterMaintenanceMode(hs, int(defaultAPITimeout), false)
+	err = hostsystem.EnterMaintenanceMode(hs, int(defaultAPITimeout), true)
 	if err != nil {
 		return fmt.Errorf("error while putting host to maintenance mode: %s", err.Error())
 	}
