@@ -119,7 +119,7 @@ func resourceVsphereHostRead(d *schema.ResourceData, meta interface{}) error {
 
 	maintenanceState, err := hostsystem.HostInMaintenance(hs)
 	if err != nil {
-		return nil
+		return err
 	}
 	d.Set("maintenance", maintenanceState)
 
@@ -137,24 +137,26 @@ func resourceVsphereHostRead(d *schema.ResourceData, meta interface{}) error {
 		d.Set("cluster", "")
 	}
 
-	lockdownMode, err := hostLockdownString(host)
+	connectionState, err := hostsystem.GetConnectionState(hs)
+	if err != nil {
+		return err
+	}
+
+	if connectionState == types.HostSystemConnectionStateDisconnected {
+		// Config and LicenseManager cannot be used while the host is
+		// disconnected.
+		d.Set("connected", false)
+		return nil
+	}
+	d.Set("connected", true)
+
+	lockdownMode, err := hostLockdownString(host.Config.LockdownMode)
 	if err != nil {
 		return nil
 	}
 
 	log.Printf("Setting lockdown to %s", lockdownMode)
 	d.Set("lockdown", lockdownMode)
-
-	connectionState, err := hostsystem.GetConnectionState(hs)
-	if err != nil {
-		return err
-	}
-
-	if connectionState != types.HostSystemConnectionStateDisconnected {
-		d.Set("connected", true)
-	} else {
-		d.Set("conencted", false)
-	}
 
 	lm := license.NewManager(client.Client)
 	am, err := lm.AssignmentManager(context.TODO())
@@ -219,8 +221,16 @@ func resourceVsphereHostCreate(d *schema.ResourceData, meta interface{}) error {
 		return fmt.Errorf("license key supplied (%s) did not match against known license keys", licenseKey)
 	}
 
-	forcedState := d.Get("forced").(bool)
-	task, err := ccr.AddHost(context.TODO(), hcs, forcedState, &licenseKey, nil)
+	var connectedState bool
+	val := d.Get("connected")
+	if val == nil {
+		connectedState = true
+	} else {
+
+		connectedState = val.(bool)
+	}
+
+	task, err := ccr.AddHost(context.TODO(), hcs, connectedState, &licenseKey, nil)
 	if err != nil {
 		log.Printf("[DEBUG] Error while adding host with hostname %s to cluster %s.  Error: %s", d.Get("hostname").(string), clusterID, err)
 	}
@@ -238,7 +248,6 @@ func resourceVsphereHostCreate(d *schema.ResourceData, meta interface{}) error {
 	}
 	hostID := strings.Split(to.Info.Result.(types.ManagedObjectReference).String(), ":")[1]
 	d.SetId(hostID)
-	log.Printf("[DEBUG] set host ID to %s", hostID)
 
 	host, err := hostsystem.FromID(client, hostID)
 	if err != nil {
@@ -251,17 +260,19 @@ func resourceVsphereHostCreate(d *schema.ResourceData, meta interface{}) error {
 		return err
 	}
 
-	var hostProps mo.HostSystem
-	err = host.Properties(context.TODO(), host.ConfigManager().Reference(), []string{"configManager.hostAccessManager"}, &hostProps)
-	if err != nil {
-		return err
-	}
+	if connectedState {
+		var hostProps mo.HostSystem
+		err = host.Properties(context.TODO(), host.ConfigManager().Reference(), []string{"configManager.hostAccessManager"}, &hostProps)
+		if err != nil {
+			return err
+		}
 
-	hamRef := hostProps.ConfigManager.HostAccessManager.Reference()
-	ham := NewHostAccessManager(client.Client, hamRef)
-	err = ham.ChangeLockdownMode(context.TODO(), lockdownMode)
-	if err != nil {
-		return err
+		hamRef := hostProps.ConfigManager.HostAccessManager.Reference()
+		ham := NewHostAccessManager(client.Client, hamRef)
+		err = ham.ChangeLockdownMode(context.TODO(), lockdownMode)
+		if err != nil {
+			return err
+		}
 	}
 
 	maintenanceMode := d.Get("maintenance").(bool)
@@ -339,9 +350,11 @@ func resourceVsphereHostUpdate(d *schema.ResourceData, meta interface{}) error {
 		"lockdown":    modifyLockdownMode,
 	}
 	for k, v := range mutableKeys {
+		log.Printf("[DEBUG] Checking if key %s changed", k)
 		if !d.HasChange(k) {
 			continue
 		}
+		log.Printf("[DEBUG] Key %s has change, processing", k)
 		old, new := d.GetChange(k)
 		err := v(d, meta, old, new)
 		if err != nil {
@@ -360,9 +373,17 @@ func resourceVsphereHostDelete(d *schema.ResourceData, meta interface{}) error {
 		return err
 	}
 
-	err = hostsystem.EnterMaintenanceMode(hs, int(defaultAPITimeout), true)
+	connectionState, err := hostsystem.GetConnectionState(hs)
 	if err != nil {
-		return fmt.Errorf("error while putting host to maintenance mode: %s", err.Error())
+		return err
+	}
+
+	if connectionState != types.HostSystemConnectionStateDisconnected {
+		// We cannot put a disconnected server in maintenance mode.
+		err = hostsystem.EnterMaintenanceMode(hs, int(defaultAPITimeout), true)
+		if err != nil {
+			return fmt.Errorf("error while putting host to maintenance mode: %s", err.Error())
+		}
 	}
 
 	task, err := hs.Destroy(context.TODO())
@@ -527,6 +548,19 @@ func handleReconnect(d *schema.ResourceData, meta interface{}) error {
 	if to.Info.State != "success" {
 		return fmt.Errorf("Error while reconnecting host(%s): %s", hostID, to.Info.Error)
 	}
+
+	maintenanceState, err := hostsystem.HostInMaintenance(host)
+	if err != nil {
+		return nil
+	}
+
+	maintenanceConfig := d.Get("maintenance").(bool)
+	if maintenanceState && !maintenanceConfig {
+		err := hostsystem.ExitMaintenanceMode(host, int(defaultAPITimeout))
+		if err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -609,14 +643,13 @@ func hostLockdownType(lockdownMode string) (types.HostLockdownMode, error) {
 	return "", fmt.Errorf("Unknwown Lockdown mode encountered")
 }
 
-func hostLockdownString(host *mo.HostSystem) (string, error) {
+func hostLockdownString(lockdownMode types.HostLockdownMode) (string, error) {
 	lockdownModes := map[types.HostLockdownMode]string{
 		types.HostLockdownModeLockdownDisabled: "disabled",
 		types.HostLockdownModeLockdownNormal:   "normal",
 		types.HostLockdownModeLockdownStrict:   "strict",
 	}
 
-	lockdownMode := host.Config.LockdownMode
 	log.Printf("Looking for mode %s in lockdown modes %#v", lockdownMode, lockdownModes)
 	if modeString, ok := lockdownModes[lockdownMode]; ok {
 		log.Printf("Found match for %s. Returning %s.", lockdownMode, modeString)

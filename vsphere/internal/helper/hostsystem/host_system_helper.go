@@ -144,7 +144,21 @@ func EnterMaintenanceMode(host *object.HostSystem, timeout int, evacuate bool) e
 		return err
 	}
 
-	return task.Wait(ctx)
+	err = task.Wait(ctx)
+	if err != nil {
+		return err
+	}
+	var to mo.Task
+	err = task.Properties(context.TODO(), task.Reference(), nil, &to)
+	if err != nil {
+		log.Printf("[DEBUG] Failed while getting task results: %s", err)
+		return err
+	}
+
+	if to.Info.State != "success" {
+		return fmt.Errorf("Error while putting host(%s) in maintenance mode: %s", host.Reference, to.Info.Error)
+	}
+	return nil
 }
 
 // ExitMaintenanceMode takes a host out of maintenance mode.
@@ -168,7 +182,21 @@ func ExitMaintenanceMode(host *object.HostSystem, timeout int) error {
 		return err
 	}
 
-	return task.Wait(ctx)
+	err = task.Wait(ctx)
+	if err != nil {
+		return err
+	}
+	var to mo.Task
+	err = task.Properties(context.TODO(), task.Reference(), nil, &to)
+	if err != nil {
+		log.Printf("[DEBUG] Failed while getting task results: %s", err)
+		return err
+	}
+
+	if to.Info.State != "success" {
+		return fmt.Errorf("Error while getting host(%s) out of maintenance mode: %s", host.Reference, to.Info.Error)
+	}
+	return nil
 }
 
 // GetConnectionState returns the host's connection state (see vim.HostSystem.ConnectionState)
