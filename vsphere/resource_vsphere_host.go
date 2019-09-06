@@ -27,7 +27,9 @@ func resourceVsphereHost() *schema.Resource {
 		Read:   resourceVsphereHostRead,
 		Update: resourceVsphereHostUpdate,
 		Delete: resourceVsphereHostDelete,
-		// Importer: ,
+		Importer: &schema.ResourceImporter{
+			State: schema.ImportStatePassthrough,
+		},
 		Schema: map[string]*schema.Schema{
 			"cluster": {
 				Type:        schema.TypeString,
@@ -178,9 +180,21 @@ func resourceVsphereHostRead(d *schema.ResourceData, meta interface{}) error {
 	}
 
 	if !licFound {
-		d.Set("license", "")
+		// no licenses attached to the host, assign the evaluation one
+		d.Set("license", "00000-00000-00000-00000-00000")
 	}
 
+	hostThumbprint := host.Summary.Config.SslThumbprint
+	configThumbprint := d.Get("thumbprint").(string)
+	if hostThumbprint != configThumbprint {
+		d.Set("thumbprint", hostThumbprint)
+	}
+
+	hostName := host.Summary.Config.Name
+	configName := d.Get("hostname").(string)
+	if hostName != configName {
+		d.Set("hostname", hostName)
+	}
 	return nil
 }
 
@@ -220,7 +234,6 @@ func resourceVsphereHostCreate(d *schema.ResourceData, meta interface{}) error {
 	if !licFound {
 		return fmt.Errorf("license key supplied (%s) did not match against known license keys", licenseKey)
 	}
-
 	var connectedState bool
 	val := d.Get("connected")
 	if val == nil {
@@ -348,6 +361,7 @@ func resourceVsphereHostUpdate(d *schema.ResourceData, meta interface{}) error {
 		"cluster":     modifyCluster,
 		"maintenance": modifyMaintenanceMode,
 		"lockdown":    modifyLockdownMode,
+		"thumbprint":  modifyThumbprint,
 	}
 	for k, v := range mutableKeys {
 		log.Printf("[DEBUG] Checking if key %s changed", k)
@@ -514,6 +528,10 @@ func modifyCluster(d *schema.ResourceData, meta, old, new interface{}) error {
 	}
 
 	return nil
+}
+
+func modifyThumbprint(d *schema.ResourceData, meta, old, new interface{}) error {
+	return handleReconnect(d, meta)
 }
 
 func handleReconnect(d *schema.ResourceData, meta interface{}) error {

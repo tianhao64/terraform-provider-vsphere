@@ -18,6 +18,26 @@ import (
 	"github.com/hashicorp/terraform/terraform"
 )
 
+func TestAccResourceVsphereHost_import(t *testing.T) {
+	resource.Test(t, resource.TestCase{
+		PreCheck: func() {
+			testAccPreCheck(t)
+		},
+		Providers:    testAccProviders,
+		CheckDestroy: testAccVSphereHostDestroy,
+		Steps: []resource.TestStep{
+			{
+				Config: testAccVSphereHostConfig_import(),
+				Check: resource.ComposeTestCheckFunc(
+					testAccVSphereHostExists("vsphere_host.h1"),
+				),
+				ImportState:       true,
+				ImportStateVerify: true,
+			},
+		},
+	})
+
+}
 func TestAccResourceVSphereHost_basic(t *testing.T) {
 
 	resource.Test(t, resource.TestCase{
@@ -331,6 +351,40 @@ func testAccVSphereHostConfig() string {
 	  # Makes sense to update
 	  license = "%s"
 	  cluster = data.vsphere_compute_cluster.c1.id
+	}	  
+	`, os.Getenv("VSPHERE_DATACENTER"),
+		os.Getenv("VSPHERE_CLUSTER"),
+		os.Getenv("ESX_HOSTNAME"),
+		os.Getenv("ESX_USERNAME"),
+		os.Getenv("ESX_PASSWORD"),
+		os.Getenv("ESX_THUMBPRINT"),
+		os.Getenv("VSPHERE_LICENSE"))
+}
+
+func testAccVSphereHostConfig_import() string {
+	return fmt.Sprintf(`
+	data "vsphere_datacenter" "dc" {
+	  name = "%s"
+	}
+		
+	data "vsphere_compute_cluster" "c1" {
+	  name = "%s"
+	  datacenter_id = data.vsphere_datacenter.dc.id
+	}
+		
+	resource "vsphere_host" "h1" {
+	  # Useful only for connection
+	  hostname = "%s"
+	  username = "%s"
+	  password = "%s"
+	  thumbprint = "%s"
+	
+	  # Makes sense to update
+	  license = "%s"
+	  cluster = data.vsphere_compute_cluster.c1.id
+	  lifecycle {
+	    ignore_changes = ["username", "password", "hostname"]
+	  }	
 	}	  
 	`, os.Getenv("VSPHERE_DATACENTER"),
 		os.Getenv("VSPHERE_CLUSTER"),
