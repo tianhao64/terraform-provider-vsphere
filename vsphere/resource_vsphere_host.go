@@ -86,6 +86,11 @@ func resourceVsphereHost() *schema.Resource {
 				Description: "Set the host's lockdown status. Default is disabled. Valid options are 'disabled', 'normal', 'strict'",
 				Default:     "disabled",
 			},
+			//"vmkernel": {
+			//	Type:     schema.TypeSet,
+			//	Optional: true,
+			//	Elem:     vmKernelSchema(),
+			//},
 		},
 	}
 }
