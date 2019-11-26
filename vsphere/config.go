@@ -23,6 +23,9 @@ import (
 	"github.com/vmware/govmomi/vim25/debug"
 	"github.com/vmware/govmomi/vim25/soap"
 	"github.com/vmware/govmomi/vim25/types"
+
+	"gitlab.eng.vmware.com/golangsdk/vsphere-automation-sdk-go/utils"
+	"gitlab.eng.vmware.com/golangsdk/vsphere-automation-sdk-go/vapi/runtime/protocol/client"
 )
 
 // VSphereClient is the client connection manager for the vSphere provider. It
@@ -38,6 +41,9 @@ type VSphereClient struct {
 
 	// The REST client used for tags and content library.
 	restClient *rest.Client
+
+	// The vAPI REST client
+	vApiConnector client.Connector
 }
 
 // TagsManager returns the embedded tags manager used for tags, after determining
@@ -160,6 +166,13 @@ func (c *Config) Client() (*VSphereClient, error) {
 		client.restClient = rest.NewClient(client.vimClient.Client)
 		err := client.restClient.Login(ctx, url.UserPassword(c.User, c.Password))
 		//err := client.restClient.LoginByToken(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		// Connect to vapi go endpoint
+		// TODO will replace restClient with the vapi client in the future
+		client.vApiConnector, err = utils.NewVsphereConnector(c.VSphereServer, c.User, c.Password)
 		if err != nil {
 			return nil, err
 		}

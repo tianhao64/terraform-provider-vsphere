@@ -95,6 +95,7 @@ func Provider() terraform.ResourceProvider {
 
 		ResourcesMap: map[string]*schema.Resource{
 			"vsphere_compute_cluster":                         resourceVSphereComputeCluster(),
+			"vsphere_compute_policy":                          resourceVSphereComputePolicy(),
 			"vsphere_compute_cluster_host_group":              resourceVSphereComputeClusterHostGroup(),
 			"vsphere_compute_cluster_vm_affinity_rule":        resourceVSphereComputeClusterVMAffinityRule(),
 			"vsphere_compute_cluster_vm_anti_affinity_rule":   resourceVSphereComputeClusterVMAntiAffinityRule(),
@@ -132,6 +133,7 @@ func Provider() terraform.ResourceProvider {
 
 		DataSourcesMap: map[string]*schema.Resource{
 			"vsphere_compute_cluster":            dataSourceVSphereComputeCluster(),
+			"vsphere_compute_policy":             dataSourceVSphereComputePolicy(),
 			"vsphere_custom_attribute":           dataSourceVSphereCustomAttribute(),
 			"vsphere_datacenter":                 dataSourceVSphereDatacenter(),
 			"vsphere_datastore":                  dataSourceVSphereDatastore(),
