@@ -2,6 +2,7 @@ package vsphere
 
 import (
 	"log"
+	"strings"
 
 	"github.com/hashicorp/terraform/helper/schema"
 	"github.com/hashicorp/terraform/helper/validation"
@@ -15,10 +16,10 @@ import (
 const resourceVSphereComputePolicyName = "vsphere_compute_policy"
 
 const (
-	computePolicyTypeVmHostAffinity        = "vm_host_affinity"
-	computePolicyTypeVmHostAntiAffinity    = "vm_host_anti_affinity"
-	computePolicyTypeVmVmAffinity          = "vm_vm_affinity"
-	computePolicyTypeVmVmAntiAffinity      = "vm_vm_anti_affinity"
+	computePolicyTypeVmHostAffinity     = "vm_host_affinity"
+	computePolicyTypeVmHostAntiAffinity = "vm_host_anti_affinity"
+	computePolicyTypeVmVmAffinity       = "vm_vm_affinity"
+	computePolicyTypeVmVmAntiAffinity   = "vm_vm_anti_affinity"
 )
 
 var computePolicyTypeAllowedValues = []string{
@@ -92,7 +93,6 @@ func resourceVSphereComputePolicyCreate(d *schema.ResourceData, meta interface{}
 		return err
 	}
 
-	// All done!
 	d.SetId(result)
 	log.Printf("[DEBUG] %s: Create finished successfully", resourceVSphereComputePolicyIDString(d))
 	return resourceVSphereComputePolicyRead(d, meta)
@@ -112,20 +112,24 @@ func resourceVSphereComputePolicyRead(d *schema.ResourceData, meta interface{}) 
 		return err
 	}
 
-	name, err := summaryStruct.String("name")
+	if err := setProp("name", summaryStruct, d); err != nil {
+		return err
+	}
+
+	if err := setProp("description", summaryStruct, d); err != nil {
+		return err
+	}
+
+	policyType, err := summaryStruct.String("capability")
 	if err != nil {
 		return err
 	}
 
-	description, err := summaryStruct.String("description")
-	if err != nil {
-		return err
-	}
-
-	if err = d.Set("name", name); err != nil {
-		return err
-	}
-	if err = d.Set("description", description); err != nil {
+	// full policy capability is something like:"com.vmware.vcenter.compute.policies.capabilities.vm_host_affinity"
+	// only use the last segment as the policy_type setting
+	policyTokens := strings.Split(policyType, ".")
+	policyType = policyTokens[len(policyTokens)-1]
+	if err = d.Set("policy_type", policyType); err != nil {
 		return err
 	}
 
@@ -136,11 +140,15 @@ func resourceVSphereComputePolicyRead(d *schema.ResourceData, meta interface{}) 
 func resourceVSphereComputePolicyDelete(d *schema.ResourceData, meta interface{}) error {
 	connector := meta.(*VSphereClient).vApiConnector
 	policyClient := compute.NewDefaultPoliciesClient(connector)
-	return policyClient.Delete(d.Id())
+	if err := policyClient.Delete(d.Id()); err != nil {
+		return err
+	}
+
+	log.Printf("[DEBUG] %s: Deleted successfully", resourceVSphereComputePolicyIDString(d))
+	return nil
 }
 
 func resourceVSphereComputePolicyImport(d *schema.ResourceData, meta interface{}) ([]*schema.ResourceData, error) {
-	// TODO
 	return []*schema.ResourceData{d}, nil
 }
 
@@ -148,4 +156,16 @@ func resourceVSphereComputePolicyImport(d *schema.ResourceData, meta interface{}
 // vsphere_compute_policy resource.
 func resourceVSphereComputePolicyIDString(d structure.ResourceIDStringer) string {
 	return structure.ResourceIDString(d, resourceVSphereComputePolicyName)
+}
+
+// setProp set the resource property based on infra return value
+func setProp(field string, structVal *data.StructValue, d *schema.ResourceData) error {
+	fieldVal, err := structVal.String(field)
+	if err != nil {
+		return err
+	}
+	if err = d.Set(field, fieldVal); err != nil {
+		return err
+	}
+	return nil
 }
