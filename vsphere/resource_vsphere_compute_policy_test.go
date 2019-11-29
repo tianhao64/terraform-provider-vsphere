@@ -2,7 +2,6 @@ package vsphere
 
 import (
 	"fmt"
-	// "os"
 	"testing"
 
 	"github.com/hashicorp/terraform/helper/resource"
@@ -10,26 +9,33 @@ import (
 
 	"gitlab.eng.vmware.com/golangsdk/vsphere-automation-sdk-go/vapi/bindings/vapi/std/errors"
 	"gitlab.eng.vmware.com/golangsdk/vsphere-automation-sdk-go/vapi/bindings/vcenter/compute"
-	// "gitlab.eng.vmware.com/golangsdk/vsphere-automation-sdk-go/vapi/runtime/data"
 )
 
-const testAccCheckVSphereComputePolicyResourceName = "vsphere_compute_policy.testPolicy"
+const testAccCheckVSphereComputePolicyResourceName = "vsphere_compute_policy.terraform_test_policy"
 
 const testAccCheckVSphereComputePolicyConfig = `
-data "vsphere_tag_category" "category" {
-	name = "testCategory"
+resource "vsphere_tag_category" "terraform_test_category" {
+	name        = "terraform-test-tag-category"
+	description = "description"
+	cardinality = "MULTIPLE"
+
+	associable_types = [
+	  "HostSystem",
+	  "VirtualMachine"
+	]
 }
 
-data "vsphere_tag" "tag" {
-	name = "testTag"
-	category_id = "${data.vsphere_tag_category.category.id}"
+resource "vsphere_tag" "terraform_test_tag" {
+	name        = "terraform-test-tag"
+	description = "description"
+	category_id = "${vsphere_tag_category.terraform_test_category.id}"
 }
 
-resource "vsphere_compute_policy" "testPolicy" {
+resource "vsphere_compute_policy" "terraform_test_policy" {
 	name = "testPolicy"
-	description = "vm_host_affinit"
-	vm_tag = "${data.vsphere_tag.tag.id}"
-	host_tag = "${data.vsphere_tag.tag.id}"
+	description = "vm_host_affinity"
+	vm_tag = "${vsphere_tag.terraform_test_tag.id}"
+	host_tag = "${vsphere_tag.terraform_test_tag.id}"
 	policy_type = "vm_host_affinity"
 }
 `
@@ -45,9 +51,9 @@ func TestAccResourceVSphereComputePolicy_basic(t *testing.T) {
 				Config: testAccCheckVSphereComputePolicyConfig,
 				Check: resource.ComposeTestCheckFunc(
 					testAccCheckVSphereComputePolicyExists(testAccCheckVSphereComputePolicyResourceName),
-					resource.TestCheckResourceAttr("vsphere_compute_policy.testPolicy", "name", "testPolicy"),
-					resource.TestCheckResourceAttr("vsphere_compute_policy.testPolicy", "description", "vm_host_affinit"),
-					resource.TestCheckResourceAttr("vsphere_compute_policy.testPolicy", "policy_type", "vm_host_affinity"),
+					resource.TestCheckResourceAttr(testAccCheckVSphereComputePolicyResourceName, "name", "testPolicy"),
+					resource.TestCheckResourceAttr(testAccCheckVSphereComputePolicyResourceName, "description", computePolicyTypeVmHostAffinity),
+					resource.TestCheckResourceAttr(testAccCheckVSphereComputePolicyResourceName, "policy_type", computePolicyTypeVmHostAffinity),
 				),
 			},
 		},

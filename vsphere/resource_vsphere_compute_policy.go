@@ -82,7 +82,7 @@ func resourceVSphereComputePolicyCreate(d *schema.ResourceData, meta interface{}
 	fields["description"] = data.NewStringValue(d.Get("description").(string))
 	fields["vm_tag"] = data.NewStringValue(d.Get("vm_tag").(string))
 	fields["host_tag"] = data.NewStringValue(d.Get("host_tag").(string))
-	capabilityFullName := "com.vmware.vcenter.compute.policies.capabilities." + d.Get("policy_type").(string)
+	capabilityFullName := policyTypeToCapability(d.Get("policy_type").(string))
 	fields["capability"] = data.NewStringValue(capabilityFullName)
 	var createSpec = data.NewStructValue("", fields)
 
@@ -112,24 +112,19 @@ func resourceVSphereComputePolicyRead(d *schema.ResourceData, meta interface{}) 
 		return err
 	}
 
-	if err := setProp("name", summaryStruct, d); err != nil {
+	if err := setResourceProp("name", summaryStruct, d); err != nil {
 		return err
 	}
 
-	if err := setProp("description", summaryStruct, d); err != nil {
+	if err := setResourceProp("description", summaryStruct, d); err != nil {
 		return err
 	}
 
-	policyType, err := summaryStruct.String("capability")
+	capability, err := summaryStruct.String("capability")
 	if err != nil {
 		return err
 	}
-
-	// full policy capability is something like:"com.vmware.vcenter.compute.policies.capabilities.vm_host_affinity"
-	// only use the last segment as the policy_type setting
-	policyTokens := strings.Split(policyType, ".")
-	policyType = policyTokens[len(policyTokens)-1]
-	if err = d.Set("policy_type", policyType); err != nil {
+	if err = d.Set("policy_type", capabilityToPolicyType(capability)); err != nil {
 		return err
 	}
 
@@ -158,8 +153,8 @@ func resourceVSphereComputePolicyIDString(d structure.ResourceIDStringer) string
 	return structure.ResourceIDString(d, resourceVSphereComputePolicyName)
 }
 
-// setProp set the resource property based on infra return value
-func setProp(field string, structVal *data.StructValue, d *schema.ResourceData) error {
+// setResourceProp set the resource property based on infra return value
+func setResourceProp(field string, structVal *data.StructValue, d *schema.ResourceData) error {
 	fieldVal, err := structVal.String(field)
 	if err != nil {
 		return err
@@ -168,4 +163,15 @@ func setProp(field string, structVal *data.StructValue, d *schema.ResourceData) 
 		return err
 	}
 	return nil
+}
+
+// policyTypeToCapability converts policy type to full capability prop name used in API
+func policyTypeToCapability(policyType string) string {
+	return "com.vmware.vcenter.compute.policies.capabilities." + policyType
+}
+
+// capabilityToPolicyType converts capability to user friendly policy type value
+func capabilityToPolicyType(capability string) string {
+	tokens := strings.Split(capability, ".")
+	return tokens[len(tokens)-1]
 }

@@ -2,30 +2,37 @@ package vsphere
 
 import (
 	"fmt"
-	"os"
-	"regexp"
 	"testing"
 
 	"github.com/hashicorp/terraform/helper/resource"
 )
 
-var testAccDataSourceVSphereComputePolicyExpectedRegexp = regexp.MustCompile("^policy")
-
-func TestAccDataSourceVSphereComputePolicy(t *testing.T) {
+func TestAccDataSourceVSphereComputePolicy_basic(t *testing.T) {
 	resource.Test(t, resource.TestCase{
-		PreCheck: func() {
-			testAccPreCheck(t)
-			testAccDataSourceVSphereComputePolicyPreCheck(t)
-		},
+		PreCheck:  func() { testAccPreCheck(t) },
 		Providers: testAccProviders,
 		Steps: []resource.TestStep{
 			{
 				Config: testAccDataSourceVSphereComputePolicyConfig(),
 				Check: resource.ComposeTestCheckFunc(
-					resource.TestMatchResourceAttr(
-						"data.vsphere_compuate_policy.policy",
-						"id",
-						testAccDataSourceVSphereComputePolicyExpectedRegexp,
+					resource.TestCheckResourceAttr(
+						testAccCheckVSphereComputePolicyDataSourceName,
+						"name",
+						testAccDataSourceVSphereComputePolicyConfigName,
+					),
+					resource.TestCheckResourceAttr(
+						testAccCheckVSphereComputePolicyDataSourceName,
+						"description",
+						testAccDataSourceVSphereComputePolicyConfigDescription,
+					),
+					resource.TestCheckResourceAttr(
+						testAccCheckVSphereComputePolicyDataSourceName,
+						"policy_type",
+						computePolicyTypeVmHostAffinity,
+					),
+					resource.TestCheckResourceAttrPair(
+						testAccCheckVSphereComputePolicyDataSourceName, "id",
+						testAccCheckVSphereComputePolicyResourceName, "id",
 					),
 				),
 			},
@@ -33,16 +40,46 @@ func TestAccDataSourceVSphereComputePolicy(t *testing.T) {
 	})
 }
 
-func testAccDataSourceVSphereComputePolicyPreCheck(t *testing.T) {
-	if os.Getenv("VSPHERE_COMPUTE_POLICY") == "" {
-		t.Skip("set VSPHERE_COMPUTE_POLICY to run vsphere_compuate_policy acceptance tests")
-	}
-}
+const testAccCheckVSphereComputePolicyDataSourceName = "data.vsphere_compute_policy.terraform_test_compute_policy_data"
+const testAccDataSourceVSphereComputePolicyConfigName = "terraform-test-compute-policy"
+const testAccDataSourceVSphereComputePolicyConfigDescription = "Managed by Terraform"
 
 func testAccDataSourceVSphereComputePolicyConfig() string {
 	return fmt.Sprintf(`
-data "vsphere_compuate_policy" "policy" {
-  name = "%s"
+variable "compute_policy_name" {
+	default = "%s"
 }
-`, os.Getenv("VSPHERE_COMPUTE_POLICY"))
+
+resource "vsphere_tag_category" "test_category" {
+	name = "terraform-test-compute-policy-tag-category"
+	description = "description"
+	cardinality = "MULTIPLE"
+
+	associable_types = [
+	  "HostSystem",
+	  "VirtualMachine"
+	]
+}
+
+resource "vsphere_tag" "terraform_test_tag" {
+	name = "terraform-test-compute-policy-tag"
+	category_id = "${vsphere_tag_category.test_category.id}"
+}
+
+resource "vsphere_compute_policy" "terraform_test_policy" {
+	name = "${var.compute_policy_name}"
+	description = "%s"
+	vm_tag = "${vsphere_tag.terraform_test_tag.id}"
+	host_tag = "${vsphere_tag.terraform_test_tag.id}"
+	policy_type = "%s"
+}
+
+data "vsphere_compute_policy" "terraform_test_compute_policy_data" {
+	name = "${vsphere_compute_policy.terraform_test_policy.name}"
+}
+`,
+		testAccDataSourceVSphereComputePolicyConfigName,
+		testAccDataSourceVSphereComputePolicyConfigDescription,
+		computePolicyTypeVmHostAffinity,
+	)
 }
