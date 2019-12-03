@@ -55,7 +55,6 @@ func dataSourceVSphereComputePolicyRead(d *schema.ResourceData, meta interface{}
 		if summary.Name == policyName {
 			d.SetId(summary.Policy)
 			d.Set("name", summary.Name)
-			d.Set("description", summary.Description)
 			d.Set("policy_type", capabilityToPolicyType(summary.Capability))
 			return nil
 		}
